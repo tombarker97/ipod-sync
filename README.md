@@ -88,10 +88,10 @@ The report is at `~/Music/iPod Sync/Last sync.html`: what was scrobbled, albums 
 
 - When you plug in, the play log is read from the iPod, turned into scrobbles, archived on the Mac, and **cleared on the iPod**.
 - A play counts if the track is over 30 seconds and you listened to at least half of it, or 4 minutes – Last.fm's rules.
-- Names come from your files' tags, and times are converted from the iPod's clock using your time zone (including clock changes).
+- Names come from your files' tags, and times are converted from the iPod's clock using your time zone, summer time included. Rockbox doesn't change its clock for summer time by itself, so set the iPod's clock when the clocks change.
 - Scrobbles appear on Last.fm **at the time you listened**, not the time you synced – look in your history for that day.
 - **Last.fm only accepts plays from the last 14 days**, so plug in at least every two weeks. Older plays, and plays with impossible dates (iPod clock not set), are kept in `~/Music/Rockbox Scrobbles/unsubmittable/` rather than lost.
-- If the upload fails (e.g. no internet), plays wait in `pending/` and go next time.
+- If the upload fails (e.g. no internet), plays wait in `pending/` and go next time – a play is never sent twice. The odd play Last.fm itself rejects is kept in `unsubmittable/` and not retried.
 
 ## Playlists
 
@@ -111,7 +111,7 @@ Each sync writes them to the iPod's `/Playlists` folder in Rockbox's format. Del
 | `~/Music/iPod Sync/` | The sync report and history |
 | `~/Music/Rockbox Scrobbles/` | Archive of every play log, the Last.fm queue, plays that couldn't be sent |
 | `~/Music/RockboxBackup/` | Rockbox settings (`config.cfg`) and playlists from the iPod – last 10 syncs |
-| `~/Library/Logs/ipod-sync.log` | Detailed log of every sync |
+| `~/Library/Logs/ipod-sync.log` | Detailed log of every sync (a new one is started past 2 MB; the previous one is kept as `ipod-sync.log.1`) |
 
 ## Settings
 
@@ -125,9 +125,12 @@ Your settings live in `~/.config/ipod-sync/config` – edit them any time. The m
 | `IPOD_TZ` | your Mac's time zone | Time zone the iPod's clock is set to |
 | `LASTFM_USER` | – | Adds a Last.fm link to the report |
 | `DRY_RUN` | `no` | `yes` makes every sync a practice run |
+| `BACKUP` / `KEEP_BACKUPS` | `~/Music/RockboxBackup` / `10` | Where settings backups go, and how many to keep (only the dated backup folders in it are ever deleted) |
 | `DO_FILES` / `DO_PLAYLISTS` / `DO_SCROBBLES` / `EJECT` | `yes` | Switch parts on or off |
 | `SOUNDS` | `yes` | Start / done / problem sounds |
 | `OPEN_REPORT` | `problems` | Open the report `never`, on `problems`, or `always` |
+
+Yes/no settings also accept `true`/`false`, `1`/`0` and `on`/`off`. If the file has a mistake in it (a missing quote, a folder that would copy your whole disk), the sync doesn't run and a notification says what to fix; a setting name it doesn't recognise is listed in the report.
 
 ## How it works
 
@@ -150,6 +153,7 @@ When any drive is mounted, macOS starts **iPod Sync.app**. If the drive isn't yo
 ```bash
 cd ipod-sync && git pull && ./install.sh     # update – your settings are kept
 ./uninstall.sh                               # remove – your music, archive and backups are kept
+                                             #   (add --delete-settings to remove your settings too)
 ```
 
 ## Troubleshooting

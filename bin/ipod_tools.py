@@ -18,6 +18,7 @@ import argparse
 import glob
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -43,6 +44,9 @@ FOUR_MIN_MS = 240_000           # ...and played for half its length or 4 min
 MAX_AGE_S = 14 * 86400 - 3600   # Last.fm accepts up to 14 days; keep 1 h margin
 FUTURE_SLACK_S = 600
 CLOCK_FLOOR = 1420070400        # 2015-01-01: anything earlier = clock not set
+LEDGER_DAYS = 60                # forget processed plays after this; they're far too old for Last.fm by then
+HISTORY_LINES = 200             # sync history entries kept
+DRY_RUN_PREVIEWS = 10           # dry-run preview folders kept
 
 
 def log(msg=""):
@@ -200,10 +204,12 @@ def as_line(p):
 
 
 def write_as(path, plays):
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = path + ".tmp"                  # written in full, then renamed into place
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(AS_HEADER)
         for p in plays:
             fh.write(as_line(p))
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------
@@ -292,6 +298,12 @@ def dedupe_resumes(entries):
     return kept, dropped
 
 
+def counts_as_play(length_ms, elapsed_ms):
+    """Last.fm's rule: the track is longer than 30 s, and was played for at
+    least half its length or for 4 minutes."""
+    return length_ms > MIN_LENGTH_MS and (elapsed_ms * 2 >= length_ms or elapsed_ms >= FOUR_MIN_MS)
+
+
 def classify(utc, now):
     if utc < CLOCK_FLOOR:
         return "bad-clock"
@@ -307,6 +319,39 @@ def load_ledger(path):
         return set()
     with open(path, encoding="utf-8") as fh:
         return {l.rstrip("\n") for l in fh if l.strip()}
+
+
+def ledger_time(key):
+    """The (iPod clock) time in a ledger entry, or None if it can't be read."""
+    try:
+        if key.startswith("legacy:"):
+            return int(key[len("legacy:"):].split("\t")[6])
+        return int(key.split(":", 1)[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def trim_ledger(path, now):
+    """Drop entries older than LEDGER_DAYS. If such a play were ever read again
+    it would be held back as too old (Last.fm takes 14 days), so this can't
+    cause duplicates - it only stops the file growing forever."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        lines = [x for x in fh if x.strip()]
+    cutoff = now - LEDGER_DAYS * 86400
+    keep = [x for x in lines if (ledger_time(x.rstrip("\n")) or now) >= cutoff]
+    if len(keep) < len(lines):
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            fh.writelines(keep)
+        os.replace(path + ".tmp", path)
+
+
+def keep_newest(folder, n):
+    """Delete all but the n newest (by name) sub-folders of folder."""
+    if os.path.isdir(folder):
+        for d in sorted(x for x in os.listdir(folder) if os.path.isdir(os.path.join(folder, x)))[:-n]:
+            shutil.rmtree(os.path.join(folder, d), ignore_errors=True)
 
 
 def cmd_scrobble_collect(a):
@@ -325,6 +370,8 @@ def cmd_scrobble_collect(a):
         return 0
 
     out_dir = os.path.join(a.data, "dry-run", stamp) if a.dry_run else a.data
+    if a.dry_run:
+        keep_newest(os.path.join(a.data, "dry-run"), DRY_RUN_PREVIEWS - 1)
     for sub in ("raw", "pending", "unsubmittable", "reports"):
         os.makedirs(os.path.join(out_dir, sub) if not a.dry_run else out_dir, exist_ok=True)
     def dest(sub, name):
@@ -346,26 +393,30 @@ def cmd_scrobble_collect(a):
     entries, resumed = dedupe_resumes(entries)
 
     lib_idx = index_tree(a.library)
-    dir_cache = {}
+    dir_cache, tag_cache = {}, {}
+
+    def tags(path):                      # each file is read once, however often it was played
+        if path not in tag_cache:
+            tag_cache[path] = read_tags(path)
+        return tag_cache[path]
     plays, short = [], 0
     for e in entries:
-        if e["length_ms"] <= MIN_LENGTH_MS or not (
-                e["elapsed_ms"] * 2 >= e["length_ms"] or e["elapsed_ms"] >= FOUR_MIN_MS):
+        if not counts_as_play(e["length_ms"], e["elapsed_ms"]):
             short += 1
             continue
         rel = e["path"][len("/Music/"):] if e["path"].startswith("/Music/") else e["path"].lstrip("/")
         meta, source = None, ""
         lib_rel = lib_idx.get(nkey(rel))
         if lib_rel:
-            meta, source = read_tags(os.path.join(a.library, lib_rel)), "library"
+            meta, source = tags(os.path.join(a.library, lib_rel)), "library"
         if meta is None:
             moved = find_renamed(rel, lib_idx, dir_cache)
             if moved:
-                meta, source = read_tags(os.path.join(a.library, moved)), "library (renamed)"
+                meta, source = tags(os.path.join(a.library, moved)), "library (renamed)"
         if meta is None:
             ip = os.path.join(a.ipod, e["path"].lstrip("/"))
             if os.path.exists(ip):
-                meta, source = read_tags(ip), "ipod"
+                meta, source = tags(ip), "ipod"
         if meta is None or not meta["artist"] or not meta["title"]:
             meta, source = tags_from_path(rel), "filename"
         start_local = e["ts"] - int(round(e["elapsed_ms"] / 1000))
@@ -397,7 +448,23 @@ def cmd_scrobble_collect(a):
         p["status"] = classify(p["utc"], now)
         (ok if p["status"] == "ok" else held).append(p)
 
-    # 2. write outputs
+    # 2. real syncs: archive the raw logs first and check the copies. If the
+    #    iPod goes away now, nothing has been recorded and it all happens next time.
+    if not a.dry_run:
+        for s in sources + ([legacy] if has_legacy else []) + ([old_copy] if os.path.exists(old_copy) else []):
+            d = dest("raw", "%s-%s" % (stamp, os.path.basename(s).lstrip(".")))
+            try:
+                shutil.copy2(s, d)
+                same = os.path.getsize(d) == os.path.getsize(s)
+            except OSError as err:
+                log("Scrobbles: couldn't copy %s (%s) - plays left on the iPod for next time" % (s, err))
+                return 1
+            if not same:
+                log("Scrobbles: archive copy of %s does not match - plays left on the iPod for next time" % s)
+                return 1
+
+    # 3. write the plays out, and straight away note in the ledger that these
+    #    log lines are done, so they can never be collected twice
     if ok:
         write_as(dest("pending", "scrobbler-%s.log" % stamp), ok)
     if held:
@@ -407,6 +474,11 @@ def cmd_scrobble_collect(a):
         for p in plays:
             fh.write("\t".join([p["status"], iso(p["local"], label=False), iso(p["utc"]), iso(p["utc"], a.tz),
                                 p["tagsrc"], p["artist"], p["title"], p["path"]]) + "\n")
+    if not a.dry_run:
+        with open(ledger_path, "a", encoding="utf-8") as fh:
+            for k in new_keys + [e["key"] for e in legacy_entries]:
+                fh.write(k + "\n")
+        trim_ledger(ledger_path, now)
 
     log("Scrobbles: read %d log entries (+%d bad lines), %d already processed, "
         "%d resume duplicates, %d too short/skipped" % (total_read, bad, already, resumed, short))
@@ -437,28 +509,18 @@ def cmd_scrobble_collect(a):
         log("Scrobbles: DRY RUN - previews in %s ; iPod logs left untouched" % out_dir)
         return 0
 
-    # 3. archive raw logs, verify, then clear them on the iPod
-    archived_ok = True
-    for s in sources + ([legacy] if has_legacy else []) + ([old_copy] if os.path.exists(old_copy) else []):
-        name = os.path.basename(s).lstrip(".")
-        d = dest("raw", "%s-%s" % (stamp, name))
-        shutil.copy2(s, d)
-        if os.path.getsize(d) != os.path.getsize(s):
-            archived_ok = False
-            log("Scrobbles: archive copy of %s does not match - iPod log NOT cleared" % s)
-    if not archived_ok:
-        return 1
-    with open(ledger_path, "a", encoding="utf-8") as fh:
-        for k in new_keys:
-            fh.write(k + "\n")
-        for e in legacy_entries:
-            fh.write(e["key"] + "\n")
-    for s in rotated:
-        os.remove(s)
-    if os.path.exists(current):
-        open(current, "w").close()          # truncate; Rockbox keeps appending
-    if has_legacy:
-        os.remove(legacy)
+    # 4. clear the logs on the iPod
+    try:
+        for s in rotated:
+            os.remove(s)
+        if os.path.exists(current):
+            open(current, "w").close()          # truncate; Rockbox keeps appending
+        if has_legacy:
+            os.remove(legacy)
+    except OSError as err:
+        log("Scrobbles: plays collected and archived, but the play log on the iPod couldn't be cleared "
+            "(%s) - they're in the ledger, so they won't be counted twice" % err)
+        return 3
     log("Scrobbles: raw logs archived to %s and cleared on the iPod" % dest("raw", ""))
     return 0
 
@@ -475,6 +537,59 @@ def read_as(path):
     return header, rows
 
 
+LASTFM_BATCH = 50   # Last.fm takes up to 50 plays per request; rb-scrobbler sends them in 50s
+
+
+def append_as(path, rows):
+    """Add Audioscrobbler rows to a file, writing the header if it's new."""
+    new = not os.path.exists(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.writelines(([AS_HEADER] if new else []) + rows)
+
+
+def run_rb_scrobbler(a, rows):
+    """Send up to 50 plays (= one Last.fm request) with rb-scrobbler.
+    Returns (outcome, output lines, ignored rows) where outcome is
+      "sent"   - Last.fm got the request (any plays it ignored are in ignored rows)
+      "failed" - nothing was accepted (offline, not logged in...) - try again later"""
+    tmp = os.path.join(a.data, "pending", ".uploading.tmp")   # not matched by *.log
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines([AS_HEADER] + rows)
+    timeout = int(os.environ.get("IPOD_SYNC_UPLOAD_TIMEOUT", "600"))
+    try:
+        r = subprocess.run([a.rb_scrobbler, "-f", tmp, "-o", "0", "-n", "delete-on-success", "-c=false"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        out, code = r.stdout.strip().splitlines(), r.returncode
+    except subprocess.TimeoutExpired:
+        out, code = ["rb-scrobbler gave no answer after %d seconds" % timeout], -1
+    except OSError as e:
+        out, code = ["couldn't run rb-scrobbler: %s" % e], -1
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    if code == 0:
+        return "sent", out, []
+    m = [re.match(r"Finished: (\d+) tracks scrobbled, (\d+) failed", x) for x in out]
+    m = [x for x in m if x]
+    if not m or int(m[-1].group(1)) == 0:
+        return "failed", out, []
+    # Last.fm accepted some and ignored the rest. rb-scrobbler prints one
+    # [OK]/[FAIL] line per play, in the order they were sent.
+    marks = [x.startswith("[OK]") for x in out if x.startswith(("[OK]", "[FAIL]"))]
+    ignored = [row for row, ok in zip(rows, marks) if not ok] if len(marks) == len(rows) else []
+    return "sent", out, ignored
+
+
+def upload_failure_message(a, out):
+    text = "\n".join(out)
+    if "rb-scrobbler.key" in text:
+        return "not connected to Last.fm - run: %s -auth" % a.rb_scrobbler
+    if "no answer" in text or "couldn't run" in text:
+        return out[-1]
+    return ("couldn't reach Last.fm - offline, or the Last.fm login has expired "
+            "(if this keeps happening, run: %s -auth)" % a.rb_scrobbler)
+
+
 def cmd_scrobble_upload(a):
     pend = sorted(glob.glob(os.path.join(a.data, "pending", "*.log")))
     if not pend:
@@ -482,9 +597,15 @@ def cmd_scrobble_upload(a):
             (" (this sync's plays are in the dry-run preview)" if a.dry_run else ""))
         record("upload", {"uploaded": 0, "failed": False, "dry_run": a.dry_run})
         return 0
+    if not a.dry_run and (not a.rb_scrobbler or not os.access(a.rb_scrobbler, os.X_OK)):
+        log("Upload: rb-scrobbler not found at %s - plays left pending" % a.rb_scrobbler)
+        record("upload", {"uploaded": 0, "failed": True, "dry_run": False,
+                          "message": "rb-scrobbler not found at %s" % a.rb_scrobbler})
+        return 2
     now = int(time.time())
-    total, uploaded = 0, 0
+    total, uploaded, rejected, failure = 0, 0, 0, None
     for f in pend:
+        name = os.path.basename(f)
         header, rows = read_as(f)
         keep, expired = [], []
         for r in rows:
@@ -496,51 +617,55 @@ def cmd_scrobble_upload(a):
                 continue
             (keep if now - utc < MAX_AGE_S else expired).append(r)
         if expired and not a.dry_run:
-            os.makedirs(os.path.join(a.data, "unsubmittable"), exist_ok=True)
-            xp = os.path.join(a.data, "unsubmittable", "expired-" + os.path.basename(f))
-            with open(xp, "w", encoding="utf-8") as fh:
-                fh.writelines([AS_HEADER] + expired)
+            append_as(os.path.join(a.data, "unsubmittable", "expired-" + name), expired)
             log("Upload: %d plays in %s passed Last.fm's 14-day limit - moved to unsubmittable/"
-                % (len(expired), os.path.basename(f)))
+                % (len(expired), name))
         total += len(keep)
         if a.dry_run:
-            log("Upload: DRY RUN - would upload %d plays from %s" % (len(keep), os.path.basename(f)))
+            log("Upload: DRY RUN - would upload %d plays from %s" % (len(keep), name))
             continue
-        if not keep:
+        # one request at a time, saving progress after each, so plays Last.fm
+        # has already taken are never sent again
+        retry = []
+        for i in range(0, len(keep), LASTFM_BATCH):
+            chunk = keep[i:i + LASTFM_BATCH]
+            outcome, out, ignored = run_rb_scrobbler(a, chunk)
+            if outcome == "sent":
+                append_as(os.path.join(a.data, "sent", name), [r for r in chunk if r not in ignored])
+                uploaded += len(chunk) - len(ignored)
+                if ignored:
+                    rejected += len(ignored)
+                    append_as(os.path.join(a.data, "unsubmittable", "rejected-" + name), ignored)
+                    log("Upload: Last.fm rejected %d plays - moved to unsubmittable/ (not retried):" % len(ignored))
+                    for x in out:
+                        if x.startswith("[FAIL]"):
+                            log("   " + x)
+            else:
+                retry += chunk
+                failure = upload_failure_message(a, out)
+                log("Upload: %d plays from %s not sent - kept in pending/ for next time:\n   %s"
+                    % (len(chunk), name, "\n   ".join(out[-3:])))
+            rest = retry + keep[i + LASTFM_BATCH:]
+            if rest:
+                with open(f, "w", encoding="utf-8") as fh:
+                    fh.writelines([AS_HEADER] + rest)
+            elif os.path.exists(f):
+                os.remove(f)
+        if not keep and os.path.exists(f):
             os.remove(f)
+        if retry or not keep:
             continue
-        with open(f, "w", encoding="utf-8") as fh:
-            fh.writelines([AS_HEADER] + keep)
-        if not a.rb_scrobbler or not os.access(a.rb_scrobbler, os.X_OK):
-            log("Upload: rb-scrobbler not found at %s - %d plays left pending" % (a.rb_scrobbler, len(keep)))
-            record("upload", {"uploaded": uploaded, "failed": True, "dry_run": a.dry_run,
-                              "message": "rb-scrobbler not found at %s" % a.rb_scrobbler})
-            return 2
-        tmp = os.path.join(a.data, "pending", ".uploading.tmp")   # not matched by *.log
-        shutil.copy2(f, tmp)
-        r = subprocess.run([a.rb_scrobbler, "-f", tmp, "-o", "0", "-n", "delete-on-success", "-c=false"],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
-        out = r.stdout.strip().splitlines()
-        log("Upload: " + (out[-2] if len(out) >= 2 else (out[-1] if out else "(no output)")))
-        if r.returncode == 0 and not os.path.exists(tmp):
-            os.makedirs(os.path.join(a.data, "sent"), exist_ok=True)
-            shutil.move(f, os.path.join(a.data, "sent", os.path.basename(f)))
-            log("Upload: %s done - %d plays" % (os.path.basename(f), len(keep)))
-            uploaded += len(keep)
-        else:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            log("Upload: %s failed (exit %d) - kept in pending/ for next time:\n   %s"
-                % (os.path.basename(f), r.returncode, "\n   ".join(out[-5:])))
-            log("Upload: %d plays uploaded to Last.fm" % uploaded)
-            record("upload", {"uploaded": uploaded, "failed": True, "dry_run": a.dry_run,
-                              "message": " / ".join(out[-3:]) or "rb-scrobbler failed"})
-            return 2
-    if not a.dry_run:
-        log("Upload: %d plays uploaded to Last.fm" % uploaded)
-    record("upload", {"uploaded": uploaded, "would_upload": total if a.dry_run else 0,
-                      "failed": False, "dry_run": a.dry_run})
-    return 0
+        log("Upload: %s done - %d plays" % (name, len(keep)))
+    if a.dry_run:
+        record("upload", {"uploaded": 0, "would_upload": total, "failed": False, "dry_run": True})
+        return 0
+    log("Upload: %d plays uploaded to Last.fm" % uploaded)
+    info = {"uploaded": uploaded, "rejected": rejected, "failed": failure is not None, "dry_run": False}
+    if failure:
+        info["message"] = failure
+        log("Upload: " + failure)
+    record("upload", info)
+    return 2 if failure else 0
 
 
 # --------------------------------------------------------------------------
@@ -551,15 +676,21 @@ MANIFEST = ".mac-playlists.txt"
 
 
 def cmd_playlists_push(a):
+    if not os.path.isdir(a.playlists):
+        if not os.path.exists(os.path.join(a.ipod, "Playlists", MANIFEST)):
+            log("Playlists: none found in %s" % a.playlists)       # not using playlists - fine
+            return 0
+        log("Playlists: folder %s not found (on a drive that isn't plugged in?) - iPod playlists left unchanged"
+            % a.playlists)
+        return 1
     src = sorted(glob.glob(os.path.join(a.playlists, "*.m3u8")) + glob.glob(os.path.join(a.playlists, "*.m3u")))
     dst = os.path.join(a.ipod, "Playlists")
     ipod_idx = index_tree(os.path.join(a.ipod, "Music"))
     if not ipod_idx:
-        log("Playlists: can't see any music on the iPod - playlists left unchanged "
-            "(if this runs automatically, check Full Disk Access)")
+        log("Playlists: can't see any music on the iPod - playlists left unchanged")
         return 1
     lib_root = os.path.abspath(a.library).rstrip("/") + "/"
-    written, missing_total, stats = [], 0, []
+    written, failed, missing_total, stats = [], [], 0, []
     for m in src:
         name = os.path.splitext(os.path.basename(m))[0] + ".m3u8"
         out, missing = [], []
@@ -586,9 +717,14 @@ def cmd_playlists_push(a):
             log("            missing: %s" % x)
         stats.append({"name": name[:-5], "tracks": len(out), "missing": len(missing)})
         if not a.dry_run:
-            os.makedirs(dst, exist_ok=True)
-            with open(os.path.join(dst, name), "w", encoding="utf-8", newline="\n") as fh:
-                fh.write("\n".join(out) + ("\n" if out else ""))
+            try:
+                os.makedirs(dst, exist_ok=True)
+                with open(os.path.join(dst, name), "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write("\n".join(out) + ("\n" if out else ""))
+            except OSError as err:
+                log("Playlists: couldn't write %s to the iPod (%s)" % (name, err))
+                failed.append(name)
+                continue
         written.append(name)
     # remove playlists this script created earlier that no longer exist on the Mac
     mpath = os.path.join(dst, MANIFEST)
@@ -596,21 +732,26 @@ def cmd_playlists_push(a):
     if os.path.exists(mpath):
         with open(mpath, encoding="utf-8") as fh:
             previous = {l.strip() for l in fh if l.strip()}
-    stale = sorted(previous - set(written))
-    for s in stale:
-        log("Playlists: %s removed (no longer in %s)" % (s, a.playlists))
-        if not a.dry_run and os.path.exists(os.path.join(dst, s)):
-            os.remove(os.path.join(dst, s))
-    if not a.dry_run and (written or previous):
-        with open(mpath, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(written) + "\n")
+    stale = sorted(previous - set(written) - set(failed))
+    keep_listed = sorted(previous & set(failed))     # still ours, even though this update failed
+    try:
+        for s in stale:
+            log("Playlists: %s removed (no longer in %s)" % (s, a.playlists))
+            if not a.dry_run and os.path.exists(os.path.join(dst, s)):
+                os.remove(os.path.join(dst, s))
+        if not a.dry_run and (written or previous):
+            with open(mpath, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(sorted(written + keep_listed)) + "\n")
+    except OSError as err:
+        log("Playlists: couldn't update the iPod's playlists folder (%s)" % err)
+        return 1
     record("playlists", {"lists": stats, "removed": stale, "dry_run": a.dry_run})
     if not src:
         log("Playlists: none found in %s" % a.playlists)
     elif a.dry_run:
         log("Playlists: DRY RUN - nothing written; 'not on iPod' counts reflect the iPod "
             "before this sync's file copy")
-    return 0
+    return 1 if failed else 0
 
 
 OSA_NAMES = '''
@@ -680,7 +821,7 @@ def build_tag_index(library, cache_path):
         except Exception:
             cache = {}
     idx, fresh = index_tree(library), {}
-    for k, rel in idx.items():
+    for rel in idx.values():
         p = os.path.join(library, rel)
         st = os.stat(p)
         sig = "%d:%d" % (st.st_size, int(st.st_mtime))
@@ -776,7 +917,7 @@ def cmd_prune(a):
             rel = os.path.relpath(os.path.join(d, f), music).replace(os.sep, "/")
             if nkey(rel) not in lib:
                 doomed.append(rel)
-    listing = os.path.join(os.path.expanduser("~"), "Library", "Logs", "ipod-sync-prune.txt")
+    listing = os.path.join(a.log_dir, "ipod-sync-prune.txt")
     os.makedirs(os.path.dirname(listing), exist_ok=True)
     with open(listing, "w", encoding="utf-8") as fh:
         fh.write("\n".join(doomed) + ("\n" if doomed else ""))
@@ -789,9 +930,13 @@ def cmd_prune(a):
         log("Prune: %d files would be deleted from the iPod (list: %s)" % (len(doomed), listing))
         return 0
     for rel in doomed:
-        os.remove(os.path.join(music, rel))
+        try:
+            os.remove(os.path.join(music, rel))
+        except OSError as err:          # unplugged, or read-only
+            log("Prune: stopped - couldn't delete %s (%s)" % (rel, err))
+            return 1
     removed_dirs = 0
-    for d, dirs, files in os.walk(music, topdown=False):
+    for d, _dirs, _files in os.walk(music, topdown=False):
         if d == music:
             continue
         left = os.listdir(d)
@@ -906,7 +1051,10 @@ def cmd_summary(a):
     if up.get("failed"):
         problems.append("Last.fm upload failed (%s) - plays kept, will retry next sync"
                         % up.get("message", ""))
-    notes = []
+    notes = [w for w in (a.warnings or "").split("\n") if w.strip()]
+    if up.get("rejected"):
+        notes.append("Last.fm rejected %s (it does this for some tags or dates) - kept in "
+                     "~/Music/Rockbox Scrobbles/unsubmittable, not retried" % plural(up["rejected"], "play"))
     if rep.get("stray"):
         notes.append("%d audio files are outside /Music on the iPod and aren't managed by the sync: %s"
                      % (sum(rep["stray"].values()), ", ".join(sorted(rep["stray"]))))
@@ -928,6 +1076,8 @@ def cmd_summary(a):
     detail = " · ".join(parts) or "Already up to date · no new plays"
     if dry:
         status, title = "dry", "iPod dry run finished"
+    elif a.gone:
+        status, title = "error", "iPod was unplugged during the sync"
     elif problems and not a.ejected:
         status, title = "error", "iPod sync problem - eject in Finder before unplugging"
     elif problems:
@@ -945,13 +1095,21 @@ def cmd_summary(a):
              "scrobbled": scrobbled, "held": held, "problems": len(problems), "seconds": took}
     with open(hist_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
+    with open(hist_path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    if len(lines) > HISTORY_LINES:
+        with open(hist_path + ".tmp", "w", encoding="utf-8") as fh:
+            fh.writelines(lines[-HISTORY_LINES:])
+        os.replace(hist_path + ".tmp", hist_path)
     history = []
     with open(hist_path, encoding="utf-8") as fh:
         for line in fh:
             try:
-                history.append(json.loads(line))
-            except Exception:
-                pass
+                h = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(h, dict) and "when" in h:
+                history.append(h)
     history = history[-20:][::-1]
 
     # ---- HTML report
@@ -992,8 +1150,8 @@ def cmd_summary(a):
     sections.append("<section><h2>Playlists</h2>%s</section>" % table(
         [(x["name"], x["tracks"], x["missing"] or "") for x in lists], ["Playlist", "Tracks", "Not on iPod"]))
     sections.append("<section><h2>Recent syncs</h2>%s</section>" % table(
-        [(h["when"], h["mode"], h["added"], h["removed"], h["scrobbled"],
-          "⚠ %d" % h["problems"] if h["problems"] else "✓") for h in history],
+        [(h["when"], h.get("mode", ""), h.get("added", ""), h.get("removed", ""), h.get("scrobbled", ""),
+          "⚠ %s" % h["problems"] if h.get("problems") else "✓") for h in history],
         ["When", "Type", "Added", "Removed", "Scrobbled", "Status"]))
     page = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>iPod sync - %(when)s</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1031,6 +1189,7 @@ th,td{padding:6px 8px;border-bottom:1px solid var(--line)}tr:last-child td{borde
     print(title)
     print(detail)
     print(report)
+    print(pathlib.Path(report).as_uri())     # for the notification's click-to-open link
     return 0
 
 
@@ -1052,10 +1211,13 @@ def main():
     ap.add_argument("--force", action="store_true", help="prune: allow deleting more than half the iPod")
     ap.add_argument("--files-list", help="summary: rsync --itemize-changes output")
     ap.add_argument("--problems", default="", help="summary: newline-separated problems")
+    ap.add_argument("--warnings", default="", help="summary: newline-separated settings warnings")
     ap.add_argument("--started", help="summary: start time (epoch seconds)")
     ap.add_argument("--ejected", action="store_true", help="summary: the iPod was ejected")
+    ap.add_argument("--gone", action="store_true", help="summary: the iPod was unplugged part-way")
     ap.add_argument("--report-dir", default=os.path.join(home, "Music", "iPod Sync"))
     ap.add_argument("--lastfm-user", default="")
+    ap.add_argument("--log-dir", default=os.path.join(home, "Library", "Logs"), help="where the file lists go")
     a = ap.parse_args()
     if mutagen is None and a.command in ("scrobble-collect", "playlists-export"):
         log("WARNING: mutagen not installed - tags will be guessed from file names")

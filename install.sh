@@ -38,19 +38,19 @@ ok "Command Line Tools"
 command -v brew >/dev/null 2>&1 || die "Homebrew is needed - install it from https://brew.sh, then run this installer again."
 ok "Homebrew"
 BREW_PREFIX="$(brew --prefix)"
-if ! "$BREW_PREFIX/bin/rsync" --version 2>/dev/null | grep -q 'version 3'; then
-  note "Installing rsync (the copy built into macOS is too old)"
-  brew install rsync
-fi
+case "$("$BREW_PREFIX/bin/rsync" --version 2>/dev/null)" in
+  *"version 3"*) ;;
+  *) note "Installing rsync (the copy built into macOS is too old)"; brew install rsync ;;
+esac
 ok "rsync"
 if ! command -v terminal-notifier >/dev/null 2>&1; then
   if yes_no "Install terminal-notifier? Gives clickable notifications that open the sync report" "y"; then
     brew install terminal-notifier
   fi
 fi
-command -v terminal-notifier >/dev/null 2>&1 && ok "terminal-notifier" || note "Using macOS's built-in notifications"
+if command -v terminal-notifier >/dev/null 2>&1; then ok "terminal-notifier"; else note "Using macOS's built-in notifications"; fi
 
-PY="/usr/bin/python3"
+PY="${IPOD_SYNC_PY:-/usr/bin/python3}"      # (tests point this at a stand-in)
 "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null \
   || die "Python 3.9 or newer is needed (it comes with the Command Line Tools)."
 ok "Python $("$PY" -c 'import platform; print(platform.python_version())')"
@@ -67,6 +67,7 @@ fi
 "$HOME_DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade mutagen
 ok "Python environment (mutagen, for reading tags)"
 mkdir -p "$(dirname "$SHIM")"
+# shellcheck disable=SC2016  # $HOME and $@ are meant for the little script, not for now
 printf '#!/bin/bash\nexec "$HOME/.ipod-sync/ipod-sync.sh" "$@"\n' > "$SHIM"
 chmod 755 "$SHIM"
 ok "Command: ipod-sync  (in ~/.local/bin)"
@@ -81,7 +82,7 @@ if [ -f "$CONF" ]; then
   ok "Keeping your existing settings: $CONF"
 else
   DETECTED=""
-  for v in /Volumes/*; do [ -d "$v/.rockbox" ] && DETECTED="$(basename "$v")" && break; done
+  for v in "${VOLUMES:-/Volumes}"/*; do [ -d "$v/.rockbox" ] && DETECTED="$(basename "$v")" && break; done
   ask "iPod's name, as shown in Finder" "${DETECTED:-IPOD}";               C_NAME="$REPLY"
   ask "Music library folder (copied to the iPod)" "$HOME/Music/Music Library"; C_SRC="${REPLY%/}/"
   ask "Playlists folder (.m3u8 files)" "$HOME/Music/Playlists";           C_PL="${REPLY%/}"
@@ -150,7 +151,7 @@ if [ -x "$RB" ]; then
     ok "Already connected to Last.fm"
   elif yes_no "Connect to Last.fm now? (opens a link to approve; your password is never handled)" "y"; then
     "$RB" -auth || true      # it complains about a missing -f afterwards; that's expected
-    [ -f "$RB_KEY" ] && ok "Connected to Last.fm" || note "Not connected - run: $RB -auth"
+    if [ -f "$RB_KEY" ]; then ok "Connected to Last.fm"; else note "Not connected - run: $RB -auth"; fi
   fi
 else
   note "Skipped - plays will be collected and queued until rb-scrobbler is installed"
@@ -166,7 +167,8 @@ else
   mkdir -p "$APP/Contents/MacOS"
   cp "$REPO/app/Info.plist" "$APP/Contents/Info.plist"
   clang -O2 -Wall -o "$APP/Contents/MacOS/iPod Sync" "$REPO/app/launcher.c"
-  codesign --force --sign - --identifier "$LABEL" "$APP" >/dev/null 2>&1
+  codesign --force --sign - --identifier "$LABEL" "$APP" >/dev/null 2>&1 \
+    || die "Couldn't sign the app (codesign failed). Check the Command Line Tools, then run this installer again."
   echo "$SIG" > "$HOME_DIR/app.sha"
   ok "Built $APP"
 fi
@@ -175,7 +177,7 @@ fi
 bold "5/6  Starting automatic sync"
 UID_NUM="$(id -u)"
 for old in "$HOME"/Library/LaunchAgents/*.plist; do
-  [ -f "$old" ] && [ "$old" != "$PLIST" ] && grep -q "ipod-sync.sh" "$old" 2>/dev/null || continue
+  if [ ! -f "$old" ] || [ "$old" = "$PLIST" ] || ! grep -q "ipod-sync.sh" "$old" 2>/dev/null; then continue; fi
   note "Found an older iPod sync job: $(basename "$old")"
   if yes_no "Turn it off so the two don't both run?" "y"; then
     launchctl bootout "gui/$UID_NUM" "$old" 2>/dev/null || true
@@ -198,12 +200,16 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+for try in 1 2 3 4 5; do        # launchd can take a moment to let go of the old copy
+  launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null && break
+  [ "$try" = 5 ] && die "Couldn't start the background job. Try:  launchctl bootstrap gui/$UID_NUM \"$PLIST\""
+  sleep 1
+done
 ok "Runs whenever a drive is mounted (does nothing unless it's your iPod)"
 
 # ---------------------------------------------------------------------------
 bold "6/6  Permission to read the iPod"
-IPOD_VOL="/Volumes/$(. "$CONF"; echo "$IPOD_NAME")"
+IPOD_VOL="${VOLUMES:-/Volumes}/$(. "$CONF"; echo "$IPOD_NAME")"
 if [ -d "$IPOD_VOL/.rockbox" ]; then
   note "Your iPod is plugged in - asking macOS for permission now."
   note "If you see \"iPod Sync would like to access files on a removable volume\", click Allow."

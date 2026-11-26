@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install shellcheck rsync
+
+      # macOS's own Python (from the Command Line Tools), like the installer uses
+      - name: Python environment
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/pip install --quiet --disable-pip-version-check -r tests/requirements.txt
+
+      - name: shellcheck
+        run: shellcheck bin/ipod-sync.sh install.sh uninstall.sh
+
+      - name: ruff
+        run: .venv/bin/ruff check bin tests
+
+      # includes the FAT32 disk-image tests (hdiutil)
+      - name: pytest
+        run: .venv/bin/pytest -v --durations=10

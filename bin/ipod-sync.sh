@@ -243,7 +243,12 @@ fi
 
 # ---- 3. collect plays (before the file sync, which may delete duplicates) --
 if [ "$DO_SCROBBLES" = "yes" ]; then
-  tools scrobble-collect || problem "Couldn't read the iPod's play log - plays left on the iPod for next time"
+  tools scrobble-collect
+  case $? in
+    0) ;;
+    3) problem "Plays were collected, but the iPod's play log couldn't be cleared (unplugged or read-only?) - they won't be counted twice" ;;
+    *) problem "Couldn't read the iPod's play log - plays left on the iPod for next time" ;;
+  esac
 fi
 
 # ---- 4. mirror the library onto /Music ------------------------------------

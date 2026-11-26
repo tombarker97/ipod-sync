@@ -200,10 +200,12 @@ def as_line(p):
 
 
 def write_as(path, plays):
-    with open(path, "w", encoding="utf-8") as fh:
+    tmp = path + ".tmp"                  # written in full, then renamed into place
+    with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(AS_HEADER)
         for p in plays:
             fh.write(as_line(p))
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------
@@ -402,7 +404,23 @@ def cmd_scrobble_collect(a):
         p["status"] = classify(p["utc"], now)
         (ok if p["status"] == "ok" else held).append(p)
 
-    # 2. write outputs
+    # 2. real syncs: archive the raw logs first and check the copies. If the
+    #    iPod goes away now, nothing has been recorded and it all happens next time.
+    if not a.dry_run:
+        for s in sources + ([legacy] if has_legacy else []) + ([old_copy] if os.path.exists(old_copy) else []):
+            d = dest("raw", "%s-%s" % (stamp, os.path.basename(s).lstrip(".")))
+            try:
+                shutil.copy2(s, d)
+                same = os.path.getsize(d) == os.path.getsize(s)
+            except OSError as err:
+                log("Scrobbles: couldn't copy %s (%s) - plays left on the iPod for next time" % (s, err))
+                return 1
+            if not same:
+                log("Scrobbles: archive copy of %s does not match - plays left on the iPod for next time" % s)
+                return 1
+
+    # 3. write the plays out, and straight away note in the ledger that these
+    #    log lines are done, so they can never be collected twice
     if ok:
         write_as(dest("pending", "scrobbler-%s.log" % stamp), ok)
     if held:
@@ -412,6 +430,10 @@ def cmd_scrobble_collect(a):
         for p in plays:
             fh.write("\t".join([p["status"], iso(p["local"], label=False), iso(p["utc"]), iso(p["utc"], a.tz),
                                 p["tagsrc"], p["artist"], p["title"], p["path"]]) + "\n")
+    if not a.dry_run:
+        with open(ledger_path, "a", encoding="utf-8") as fh:
+            for k in new_keys + [e["key"] for e in legacy_entries]:
+                fh.write(k + "\n")
 
     log("Scrobbles: read %d log entries (+%d bad lines), %d already processed, "
         "%d resume duplicates, %d too short/skipped" % (total_read, bad, already, resumed, short))
@@ -442,28 +464,18 @@ def cmd_scrobble_collect(a):
         log("Scrobbles: DRY RUN - previews in %s ; iPod logs left untouched" % out_dir)
         return 0
 
-    # 3. archive raw logs, verify, then clear them on the iPod
-    archived_ok = True
-    for s in sources + ([legacy] if has_legacy else []) + ([old_copy] if os.path.exists(old_copy) else []):
-        name = os.path.basename(s).lstrip(".")
-        d = dest("raw", "%s-%s" % (stamp, name))
-        shutil.copy2(s, d)
-        if os.path.getsize(d) != os.path.getsize(s):
-            archived_ok = False
-            log("Scrobbles: archive copy of %s does not match - iPod log NOT cleared" % s)
-    if not archived_ok:
-        return 1
-    with open(ledger_path, "a", encoding="utf-8") as fh:
-        for k in new_keys:
-            fh.write(k + "\n")
-        for e in legacy_entries:
-            fh.write(e["key"] + "\n")
-    for s in rotated:
-        os.remove(s)
-    if os.path.exists(current):
-        open(current, "w").close()          # truncate; Rockbox keeps appending
-    if has_legacy:
-        os.remove(legacy)
+    # 4. clear the logs on the iPod
+    try:
+        for s in rotated:
+            os.remove(s)
+        if os.path.exists(current):
+            open(current, "w").close()          # truncate; Rockbox keeps appending
+        if has_legacy:
+            os.remove(legacy)
+    except OSError as err:
+        log("Scrobbles: plays collected and archived, but the play log on the iPod couldn't be cleared "
+            "(%s) - they're in the ledger, so they won't be counted twice" % err)
+        return 3
     log("Scrobbles: raw logs archived to %s and cleared on the iPod" % dest("raw", ""))
     return 0
 

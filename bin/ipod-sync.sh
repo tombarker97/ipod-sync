@@ -36,10 +36,60 @@ PYTHON="$HOME/.ipod-sync/venv/bin/python"
 RB_SCROBBLER="$HOME/.ipod-sync/rb-scrobbler"
 
 CONFIG="${IPOD_SYNC_CONFIG:-$HOME/.config/ipod-sync/config}"
-# shellcheck source=/dev/null
-[ -f "$CONFIG" ] && . "$CONFIG"
+MAC_TZ="$IPOD_TZ"
+SETTINGS_ERROR=""
+settings_error() { [ -n "$SETTINGS_ERROR" ] || SETTINGS_ERROR="$1"; }   # keep the first one
+WARNINGS=()
+warn() { WARNINGS+=("$1"); }
+if [ -f "$CONFIG" ]; then
+  # try the settings file in a throw-away shell first, so a typo (a missing
+  # quote, a $NAME that isn't set) stops the sync instead of half-applying
+  SETTINGS_ERROR=$( (set -u; . "$CONFIG") 2>&1 >/dev/null ) || settings_error "$CONFIG can't be read"
+  # shellcheck source=/dev/null
+  [ -z "$SETTINGS_ERROR" ] && . "$CONFIG"
+  KNOWN=" IPOD_NAME DRY_RUN SRC PLAYLISTS BACKUP SCROBBLES REPORT_DIR IPOD_TZ LOG DO_SCROBBLES DO_FILES
+          DO_PLAYLISTS EJECT KEEP_BACKUPS SOUNDS OPEN_REPORT LASTFM_USER PYTHON RB_SCROBBLER "
+  for name in $(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$CONFIG"); do
+    case "$KNOWN" in *[[:space:]]"$name"[[:space:]]*) ;; *) warn "Unknown setting $name in $CONFIG (a typo?) - ignored" ;; esac
+  done
+fi
 TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ipod_tools.py"
-IPOD_TZ="${IPOD_TZ:-UTC}"
+
+# ---- check the settings ---------------------------------------------------
+yes_no() {   # yes_no NAME fallback - accept Yes/true/1/on and No/false/0/off
+  local raw v
+  eval "raw=\${$1}"
+  v=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+  case "$v" in
+    yes|y|true|1|on)  v="yes" ;;
+    no|n|false|0|off) v="no" ;;
+    *) warn "$1=\"$raw\" should be yes or no - using \"$2\""; v="$2" ;;
+  esac
+  eval "$1=\$v"
+}
+yes_no DRY_RUN yes                        # when unsure, change nothing
+yes_no DO_SCROBBLES yes; yes_no DO_FILES yes; yes_no DO_PLAYLISTS yes; yes_no EJECT yes; yes_no SOUNDS yes
+case "$KEEP_BACKUPS" in ''|*[!0-9]*|0)
+  warn "KEEP_BACKUPS=\"$KEEP_BACKUPS\" isn't a number from 1 up - using 10"; KEEP_BACKUPS=10 ;;
+esac
+case "$OPEN_REPORT" in never|problems|always) ;; *)
+  warn "OPEN_REPORT=\"$OPEN_REPORT\" should be never, problems or always - using problems"; OPEN_REPORT="problems" ;;
+esac
+if [ -z "$IPOD_TZ" ]; then
+  IPOD_TZ="${MAC_TZ:-UTC}"
+elif [ ! -f "/usr/share/zoneinfo/$IPOD_TZ" ]; then
+  warn "IPOD_TZ=\"$IPOD_TZ\" isn't a time zone name (e.g. Europe/London) - using the Mac's, ${MAC_TZ:-UTC}"
+  IPOD_TZ="${MAC_TZ:-UTC}"
+fi
+while [ "${SRC%/}" != "$SRC" ]; do SRC="${SRC%/}"; done      # trailing slashes are added back below
+case "$SRC" in
+  ""|"$HOME") settings_error "SRC=\"$SRC/\" would copy your whole disk or home folder - set it to your music library folder" ;;
+  /*)         SRC="$SRC/" ;;              # the slash means "copy what's inside"
+  *)          settings_error "SRC=\"$SRC\" must be a full path, e.g. \$HOME/Music/Music Library/" ;;
+esac
+case "$IPOD_NAME" in ""|.|..|*/*)
+  settings_error "IPOD_NAME=\"$IPOD_NAME\" should be the iPod's name as shown in Finder" ;;
+esac
 # ---------------------------------------------------------------------------
 
 MANUAL="no"
@@ -92,7 +142,11 @@ if [ "$MANUAL" = "yes" ]; then
   exec > >(tee -a "$LOG") 2>&1            # by hand: show output and log it
 else
   exec >>"$LOG" 2>&1
-  sleep 3                                 # let the drive finish mounting
+  sleep "${IPOD_SYNC_MOUNT_DELAY:-3}"     # let the drive finish mounting
+fi
+if [ -n "$SETTINGS_ERROR" ]; then
+  echo "Settings problem in $CONFIG: $SETTINGS_ERROR"
+  sound problem; notify "iPod Sync settings need fixing" "$SETTINGS_ERROR"; exit 1
 fi
 
 # ---- 1. detect --------------------------------------------------------------
@@ -135,6 +189,7 @@ tools() { "$PYTHON" "$TOOLS" "$1" --ipod "$IPOD" --library "${SRC%/}" --data "$S
 
 echo
 echo "===== $(date '+%F %T') iPod mounted $( [ "$DRY_RUN" = "yes" ] && echo '(DRY RUN - nothing will change)')"
+for w in "${WARNINGS[@]}"; do echo "WARNING: $w"; done
 fail() { echo "$1"; sound problem; notify "iPod sync couldn't start" "$1"; exit 1; }
 rsync --version 2>/dev/null | grep -q 'version 3' || fail "Homebrew rsync not found - run: brew install rsync"
 [ -d "$SRC" ] || fail "Music Library folder not found: $SRC"
@@ -147,7 +202,6 @@ if [ "$DRY_RUN" = "yes" ]; then notify "Dry run started…" "Nothing will be cha
 else notify "Syncing… don't unplug" "Collecting plays, copying music, updating playlists"; fi
 
 # ---- 2. back up Rockbox settings (last 10 kept) ---------------------------
-case "$KEEP_BACKUPS" in ''|*[!0-9]*|0) echo "WARNING: KEEP_BACKUPS=\"$KEEP_BACKUPS\" isn't a number from 1 up - using 10"; KEEP_BACKUPS=10 ;; esac
 if [ "$DRY_RUN" != "yes" ]; then
   case "$BACKUP" in
     ""|/|"$HOME"|"$HOME/"|[!/]*)       # empty, the whole disk, your home folder, or not a full path
@@ -222,7 +276,7 @@ fi
 if [ -x "$PYTHON" ]; then
   PROB_TEXT=$(printf '%s\n' "${PROBLEMS[@]}")
   SUMMARY=$(tools summary --files-list "$CHANGES" --started "$STARTED" "${EJECTED[@]}" \
-            --problems "$PROB_TEXT" --report-dir "$REPORT_DIR" --lastfm-user "$LASTFM_USER")
+            --problems "$PROB_TEXT" --warnings "$(printf '%s\n' "${WARNINGS[@]}")" --report-dir "$REPORT_DIR" --lastfm-user "$LASTFM_USER")
   STATUS=$(sed -n 1p <<<"$SUMMARY"); TITLE=$(sed -n 2p <<<"$SUMMARY"); DETAIL=$(sed -n 3p <<<"$SUMMARY")
 else
   STATUS="error"; TITLE="iPod sync finished with problems"; DETAIL="${PROBLEMS[0]}"

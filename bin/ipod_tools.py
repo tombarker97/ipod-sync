@@ -974,7 +974,7 @@ def cmd_summary(a):
     if up.get("failed"):
         problems.append("Last.fm upload failed (%s) - plays kept, will retry next sync"
                         % up.get("message", ""))
-    notes = []
+    notes = [w for w in (a.warnings or "").split("\n") if w.strip()]
     if up.get("rejected"):
         notes.append("Last.fm rejected %s (it does this for some tags or dates) - kept in "
                      "~/Music/Rockbox Scrobbles/unsubmittable, not retried" % plural(up["rejected"], "play"))
@@ -1123,6 +1123,7 @@ def main():
     ap.add_argument("--force", action="store_true", help="prune: allow deleting more than half the iPod")
     ap.add_argument("--files-list", help="summary: rsync --itemize-changes output")
     ap.add_argument("--problems", default="", help="summary: newline-separated problems")
+    ap.add_argument("--warnings", default="", help="summary: newline-separated settings warnings")
     ap.add_argument("--started", help="summary: start time (epoch seconds)")
     ap.add_argument("--ejected", action="store_true", help="summary: the iPod was ejected")
     ap.add_argument("--report-dir", default=os.path.join(home, "Music", "iPod Sync"))

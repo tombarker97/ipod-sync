@@ -51,6 +51,21 @@ done
 exec /bin/rm "$@"
 '''
 
+RSYNC_GUARD = r'''#!/bin/bash
+# real rsync, but only between folders inside the test sandbox (so a bad SRC
+# setting can never copy the Mac's disk); extra roots in SANDBOX_EXTRA_ROOTS
+for a in "$@"; do
+  case "$a" in
+    -*) ;;
+    "$SANDBOX_ROOT"/*) ;;
+    *) ok=""
+       for r in ${SANDBOX_EXTRA_ROOTS:-}; do case "$a" in "$r"/*) ok=1 ;; esac; done
+       [ -n "$ok" ] || { echo "TEST GUARD: refused rsync $a" >&2; echo "rsync $a" >> "$SANDBOX_ROOT/rm-refused"; exit 1; } ;;
+  esac
+done
+exec "$REAL_RSYNC" "$@"
+'''
+
 
 def write_exe(path, text):
     with open(path, "w") as fh:
@@ -94,6 +109,7 @@ class Sandbox:
         for s in STUBS:
             write_exe(os.path.join(self.stubs, s), STUB)
         write_exe(os.path.join(self.stubs, "rm"), RM_GUARD)
+        write_exe(os.path.join(self.stubs, "rsync"), RSYNC_GUARD)
         os.makedirs(os.path.dirname(self.rb_key))
         with open(self.rb_key, "w") as fh:
             fh.write("fake\n")
@@ -107,6 +123,8 @@ class Sandbox:
             "IPOD_SYNC_LOCK": os.path.join(self.root, "ipod-sync.lock"),
             "VOLUMES": self.volumes,
             "SANDBOX_ROOT": self.root,
+            "IPOD_SYNC_MOUNT_DELAY": "0",
+            "REAL_RSYNC": real_rsync(),
             "FAKE_RB_RECORD": os.path.join(self.root, "lastfm-accepted.jsonl"),
         }
         self.settings = {}
@@ -233,7 +251,7 @@ def sb(tmp_path):
     s = Sandbox(tmp_path)
     yield s
     refused = os.path.join(s.root, "rm-refused")
-    assert not os.path.exists(refused), "script tried to delete outside the sandbox: " + open(refused).read()
+    assert not os.path.exists(refused), "script tried to touch files outside the sandbox: " + open(refused).read()
 
 
 @pytest.fixture
@@ -242,7 +260,10 @@ def tools_mod():
     return ipod_tools
 
 
+def real_rsync():
+    return shutil.which("rsync", path="/opt/homebrew/bin:/usr/local/bin") or "/usr/bin/rsync"
+
+
 def have_rsync3():
-    r = shutil.which("rsync", path="/opt/homebrew/bin:/usr/local/bin")
-    return bool(r) and "version 3" in subprocess.run([r, "--version"], stdout=subprocess.PIPE,
-                                                       text=True).stdout
+    return "version 3" in subprocess.run([real_rsync(), "--version"], stdout=subprocess.PIPE,
+                                         text=True).stdout

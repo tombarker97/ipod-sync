@@ -15,6 +15,14 @@ tail -40 ~/Library/Logs/ipod-sync.log
 - If the iPod doesn't appear in Finder at all, see *"USB keypad mode"* below.
 - No notifications? Check **System Settings → Notifications → terminal-notifier** (or **Script Editor** if you didn't install terminal-notifier) is allowed, and that a Focus mode isn't hiding them. The sync still runs either way – check the report.
 
+### "iPod Sync settings need fixing"
+
+Your settings file (`~/.config/ipod-sync/config`) has a mistake, so nothing was synced. The notification and the log say which line – usually a missing `"`, or a `$NAME` that isn't set (only `$HOME` works there). Fix it and plug in again.
+
+### Two iPods, or the iPod shows up as "IPOD 1"
+
+If another drive is already called `IPOD`, macOS names the iPod `IPOD 1`; the sync finds it either way. If two Rockbox drives with that name are plugged in at once, it won't guess – unplug one.
+
 ### "iPod Sync can't read the iPod"
 
 macOS hasn't given the app permission to read external drives.
@@ -46,17 +54,28 @@ If it still won't build, browse by **Files** instead – your library is already
 
 After a big retagging session, run **Initialize Now** again – **Update Now** finds new and deleted files but doesn't reliably re-read changed tags.
 
+### "The iPod was unplugged during the sync" / "The iPod is full"
+
+- **Unplugged:** nothing is lost – plays were saved first. Plug it back in and the next sync finishes the job.
+- **Full:** songs that didn't fit weren't copied. Albums you deleted on the Mac are still removed, which may make room; otherwise remove music from your library folder and sync again.
+- **Read-only:** the card has a problem – run **First Aid** on it in Disk Utility.
+
+### The log says "already running" but nothing is syncing
+
+Only one sync runs at a time. A sync that crashed (or the Mac losing power mid-sync) used to block later ones until a restart; now the next sync notices and carries on. If it still happens, check for a stuck sync with `ps ax | grep ipod-sync`.
+
 ### My plays aren't on Last.fm
 
 - Scrobbles are filed **at the time you listened**, so look in your Last.fm history for that day, not at the top.
 - Open the report (`~/Music/iPod Sync/Last sync.html`) – it lists what was sent and how many plays were held back.
 - **Held back** means older than 14 days (Last.fm won't take them) or a date that can't be right (the iPod's clock wasn't set). They're kept in `~/Music/Rockbox Scrobbles/unsubmittable/`.
 - Check **Settings → Playback Settings → Logging** is on.
-- Upload failed? Plays wait in `~/Music/Rockbox Scrobbles/pending/` and retry next sync. If it says you're not connected, run `~/.ipod-sync/rb-scrobbler -auth`.
+- Upload failed? Plays wait in `~/Music/Rockbox Scrobbles/pending/` and retry next sync (plays Last.fm already took are never sent again). If it says you're not connected – or "couldn't reach Last.fm" keeps happening while you're online, which is what an expired login looks like – run `~/.ipod-sync/rb-scrobbler -auth`.
+- **Rejected by Last.fm** means Last.fm refused that particular play; it's kept in `unsubmittable/rejected-*.log` and not retried.
 
 ### Times on Last.fm are an hour (or more) out
 
-Set the iPod's clock (**Settings → General Settings → System → Time & Date**) and make sure `IPOD_TZ` in your config is the time zone that clock is set to, e.g. `Europe/London`. Clock changes (summer/winter time) are handled automatically.
+Set the iPod's clock (**Settings → General Settings → System → Time & Date**) and make sure `IPOD_TZ` in your config is the time zone that clock is set to, e.g. `Europe/London` (a misspelt one falls back to the Mac's, with a warning in the report). Summer/winter time is worked out for you – but Rockbox doesn't move its own clock when the clocks change, so set the iPod's time then too, or plays will be an hour out.
 
 ### "Removing old songs from the iPod was skipped"
 

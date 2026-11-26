@@ -480,6 +480,59 @@ def read_as(path):
     return header, rows
 
 
+LASTFM_BATCH = 50   # Last.fm takes up to 50 plays per request; rb-scrobbler sends them in 50s
+
+
+def append_as(path, rows):
+    """Add Audioscrobbler rows to a file, writing the header if it's new."""
+    new = not os.path.exists(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.writelines(([AS_HEADER] if new else []) + rows)
+
+
+def run_rb_scrobbler(a, rows):
+    """Send up to 50 plays (= one Last.fm request) with rb-scrobbler.
+    Returns (outcome, output lines, ignored rows) where outcome is
+      "sent"   - Last.fm got the request (any plays it ignored are in ignored rows)
+      "failed" - nothing was accepted (offline, not logged in...) - try again later"""
+    tmp = os.path.join(a.data, "pending", ".uploading.tmp")   # not matched by *.log
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines([AS_HEADER] + rows)
+    timeout = int(os.environ.get("IPOD_SYNC_UPLOAD_TIMEOUT", "600"))
+    try:
+        r = subprocess.run([a.rb_scrobbler, "-f", tmp, "-o", "0", "-n", "delete-on-success", "-c=false"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        out, code = r.stdout.strip().splitlines(), r.returncode
+    except subprocess.TimeoutExpired:
+        out, code = ["rb-scrobbler gave no answer after %d seconds" % timeout], -1
+    except OSError as e:
+        out, code = ["couldn't run rb-scrobbler: %s" % e], -1
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    if code == 0:
+        return "sent", out, []
+    m = [re.match(r"Finished: (\d+) tracks scrobbled, (\d+) failed", x) for x in out]
+    m = [x for x in m if x]
+    if not m or int(m[-1].group(1)) == 0:
+        return "failed", out, []
+    # Last.fm accepted some and ignored the rest. rb-scrobbler prints one
+    # [OK]/[FAIL] line per play, in the order they were sent.
+    marks = [x.startswith("[OK]") for x in out if x.startswith(("[OK]", "[FAIL]"))]
+    ignored = [row for row, ok in zip(rows, marks) if not ok] if len(marks) == len(rows) else []
+    return "sent", out, ignored
+
+
+def upload_failure_message(a, out):
+    text = "\n".join(out)
+    if "rb-scrobbler.key" in text:
+        return "not connected to Last.fm - run: %s -auth" % a.rb_scrobbler
+    if "no answer" in text or "couldn't run" in text:
+        return out[-1]
+    return ("couldn't reach Last.fm - offline, or the Last.fm login has expired "
+            "(if this keeps happening, run: %s -auth)" % a.rb_scrobbler)
+
+
 def cmd_scrobble_upload(a):
     pend = sorted(glob.glob(os.path.join(a.data, "pending", "*.log")))
     if not pend:
@@ -487,9 +540,15 @@ def cmd_scrobble_upload(a):
             (" (this sync's plays are in the dry-run preview)" if a.dry_run else ""))
         record("upload", {"uploaded": 0, "failed": False, "dry_run": a.dry_run})
         return 0
+    if not a.dry_run and (not a.rb_scrobbler or not os.access(a.rb_scrobbler, os.X_OK)):
+        log("Upload: rb-scrobbler not found at %s - plays left pending" % a.rb_scrobbler)
+        record("upload", {"uploaded": 0, "failed": True, "dry_run": False,
+                          "message": "rb-scrobbler not found at %s" % a.rb_scrobbler})
+        return 2
     now = int(time.time())
-    total, uploaded = 0, 0
+    total, uploaded, rejected, failure = 0, 0, 0, None
     for f in pend:
+        name = os.path.basename(f)
         header, rows = read_as(f)
         keep, expired = [], []
         for r in rows:
@@ -501,51 +560,55 @@ def cmd_scrobble_upload(a):
                 continue
             (keep if now - utc < MAX_AGE_S else expired).append(r)
         if expired and not a.dry_run:
-            os.makedirs(os.path.join(a.data, "unsubmittable"), exist_ok=True)
-            xp = os.path.join(a.data, "unsubmittable", "expired-" + os.path.basename(f))
-            with open(xp, "w", encoding="utf-8") as fh:
-                fh.writelines([AS_HEADER] + expired)
+            append_as(os.path.join(a.data, "unsubmittable", "expired-" + name), expired)
             log("Upload: %d plays in %s passed Last.fm's 14-day limit - moved to unsubmittable/"
-                % (len(expired), os.path.basename(f)))
+                % (len(expired), name))
         total += len(keep)
         if a.dry_run:
-            log("Upload: DRY RUN - would upload %d plays from %s" % (len(keep), os.path.basename(f)))
+            log("Upload: DRY RUN - would upload %d plays from %s" % (len(keep), name))
             continue
-        if not keep:
+        # one request at a time, saving progress after each, so plays Last.fm
+        # has already taken are never sent again
+        retry = []
+        for i in range(0, len(keep), LASTFM_BATCH):
+            chunk = keep[i:i + LASTFM_BATCH]
+            outcome, out, ignored = run_rb_scrobbler(a, chunk)
+            if outcome == "sent":
+                append_as(os.path.join(a.data, "sent", name), [r for r in chunk if r not in ignored])
+                uploaded += len(chunk) - len(ignored)
+                if ignored:
+                    rejected += len(ignored)
+                    append_as(os.path.join(a.data, "unsubmittable", "rejected-" + name), ignored)
+                    log("Upload: Last.fm rejected %d plays - moved to unsubmittable/ (not retried):" % len(ignored))
+                    for x in out:
+                        if x.startswith("[FAIL]"):
+                            log("   " + x)
+            else:
+                retry += chunk
+                failure = upload_failure_message(a, out)
+                log("Upload: %d plays from %s not sent - kept in pending/ for next time:\n   %s"
+                    % (len(chunk), name, "\n   ".join(out[-3:])))
+            rest = retry + keep[i + LASTFM_BATCH:]
+            if rest:
+                with open(f, "w", encoding="utf-8") as fh:
+                    fh.writelines([AS_HEADER] + rest)
+            elif os.path.exists(f):
+                os.remove(f)
+        if not keep and os.path.exists(f):
             os.remove(f)
+        if retry or not keep:
             continue
-        with open(f, "w", encoding="utf-8") as fh:
-            fh.writelines([AS_HEADER] + keep)
-        if not a.rb_scrobbler or not os.access(a.rb_scrobbler, os.X_OK):
-            log("Upload: rb-scrobbler not found at %s - %d plays left pending" % (a.rb_scrobbler, len(keep)))
-            record("upload", {"uploaded": uploaded, "failed": True, "dry_run": a.dry_run,
-                              "message": "rb-scrobbler not found at %s" % a.rb_scrobbler})
-            return 2
-        tmp = os.path.join(a.data, "pending", ".uploading.tmp")   # not matched by *.log
-        shutil.copy2(f, tmp)
-        r = subprocess.run([a.rb_scrobbler, "-f", tmp, "-o", "0", "-n", "delete-on-success", "-c=false"],
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
-        out = r.stdout.strip().splitlines()
-        log("Upload: " + (out[-2] if len(out) >= 2 else (out[-1] if out else "(no output)")))
-        if r.returncode == 0 and not os.path.exists(tmp):
-            os.makedirs(os.path.join(a.data, "sent"), exist_ok=True)
-            shutil.move(f, os.path.join(a.data, "sent", os.path.basename(f)))
-            log("Upload: %s done - %d plays" % (os.path.basename(f), len(keep)))
-            uploaded += len(keep)
-        else:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            log("Upload: %s failed (exit %d) - kept in pending/ for next time:\n   %s"
-                % (os.path.basename(f), r.returncode, "\n   ".join(out[-5:])))
-            log("Upload: %d plays uploaded to Last.fm" % uploaded)
-            record("upload", {"uploaded": uploaded, "failed": True, "dry_run": a.dry_run,
-                              "message": " / ".join(out[-3:]) or "rb-scrobbler failed"})
-            return 2
-    if not a.dry_run:
-        log("Upload: %d plays uploaded to Last.fm" % uploaded)
-    record("upload", {"uploaded": uploaded, "would_upload": total if a.dry_run else 0,
-                      "failed": False, "dry_run": a.dry_run})
-    return 0
+        log("Upload: %s done - %d plays" % (name, len(keep)))
+    if a.dry_run:
+        record("upload", {"uploaded": 0, "would_upload": total, "failed": False, "dry_run": True})
+        return 0
+    log("Upload: %d plays uploaded to Last.fm" % uploaded)
+    info = {"uploaded": uploaded, "rejected": rejected, "failed": failure is not None, "dry_run": False}
+    if failure:
+        info["message"] = failure
+        log("Upload: " + failure)
+    record("upload", info)
+    return 2 if failure else 0
 
 
 # --------------------------------------------------------------------------
@@ -912,6 +975,9 @@ def cmd_summary(a):
         problems.append("Last.fm upload failed (%s) - plays kept, will retry next sync"
                         % up.get("message", ""))
     notes = []
+    if up.get("rejected"):
+        notes.append("Last.fm rejected %s (it does this for some tags or dates) - kept in "
+                     "~/Music/Rockbox Scrobbles/unsubmittable, not retried" % plural(up["rejected"], "play"))
     if rep.get("stray"):
         notes.append("%d audio files are outside /Music on the iPod and aren't managed by the sync: %s"
                      % (sum(rep["stray"].values()), ", ".join(sorted(rep["stray"]))))

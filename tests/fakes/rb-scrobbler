@@ -8,7 +8,8 @@ and "-n delete-on-success" deleting the file only when nothing failed.
 Behaviour is picked with FAKE_RB_MODE:
   ok           every play accepted (default)
   fail         every batch fails (offline / expired login look the same)
-  partial:N    the first N batches are accepted, later batches fail
+  partial:N    the first N requests (batches of 50) are accepted, later ones fail -
+               counted across runs, like a network that drops part-way
   ignore       plays whose title contains IGNOREME are "ignored" by Last.fm
   hang         sleep for a long time (to test the timeout)
 Every play the fake accepted is appended to FAKE_RB_RECORD (one JSON per line).
@@ -48,10 +49,13 @@ with open(path, encoding="utf-8") as fh:
             continue
         tracks.append(f)
 
+counter = (record or os.path.join(os.path.dirname(path), "fake")) + ".requests"
 ok = fail = 0
 for b in range(0, len(tracks), 50):
     batch = tracks[b:b + 50]
-    n = b // 50
+    n = int(open(counter).read()) if os.path.exists(counter) else 0
+    with open(counter, "w") as fh:
+        fh.write(str(n + 1))
     batch_ok = mode == "ok" or mode == "ignore" or (mode.startswith("partial:") and n < int(mode.split(":")[1]))
     for f in batch:
         accepted = batch_ok and not (mode == "ignore" and "IGNOREME" in f[2])

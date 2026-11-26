@@ -104,10 +104,30 @@ fi
 if [ "${CHECK:-}" = "yes" ]; then     # used by install.sh to trigger macOS's permission prompt
   echo "OK: can read $IPOD"; notify "iPod Sync can read your iPod" "Automatic sync is ready"; exit 0
 fi
-mkdir "$LOCK" 2>/dev/null || { echo "already running"; exit 0; }
+# one sync at a time: the lock is a folder holding the sync's process ID, so a
+# lock left behind by a crash (or kill -9) is noticed instead of blocking forever
+lock_is_stale() {
+  local pid
+  pid=$(cat "$LOCK/pid" 2>/dev/null)
+  if [ -z "$pid" ]; then     # no PID: a sync that has only just started, or an older version's lock
+    [ -n "$(find "$LOCK" -maxdepth 0 -mmin +2 2>/dev/null)" ]
+    return
+  fi
+  ! ps -p "$pid" -o command= 2>/dev/null | grep -q 'ipod-sync'
+}
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if lock_is_stale; then
+    echo "Taking over a lock left by a sync that didn't finish ($LOCK)"
+    rm -rf "$LOCK"
+    mkdir "$LOCK" 2>/dev/null || { echo "already running"; exit 0; }
+  else
+    echo "already running"; exit 0
+  fi
+fi
+echo $$ > "$LOCK/pid"
 RUN=$(mktemp "${TMPDIR:-/tmp}/ipod-sync-run.XXXXXX")
 export IPOD_SYNC_RUN="$RUN"
-trap 'rmdir "$LOCK"; rm -f "$RUN"' EXIT
+trap 'rm -rf "$LOCK"; rm -f "$RUN"' EXIT
 
 DRY_FLAG=(); [ "$DRY_RUN" = "yes" ] && DRY_FLAG=(--dry-run)
 tools() { "$PYTHON" "$TOOLS" "$1" --ipod "$IPOD" --library "${SRC%/}" --data "$SCROBBLES" \

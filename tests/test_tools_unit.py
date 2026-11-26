@@ -394,7 +394,8 @@ def summary(sb, run, *extra, changes=""):
     r = sb.tools("summary", "--files-list", files, "--report-dir", sb.report_dir,
                  "--started", str(int(time.time())), *extra, env={"IPOD_SYNC_RUN": runf})
     assert r.returncode == 0, r.stdout
-    status, title, detail, report = r.stdout.splitlines()[-4:]
+    status, title, detail, report, url = r.stdout.splitlines()[-5:]
+    assert url.startswith("file:///")
     return status, title, detail, open(report, encoding="utf-8").read()
 
 

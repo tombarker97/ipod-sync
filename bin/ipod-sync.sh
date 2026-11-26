@@ -116,16 +116,20 @@ STARTED=$(date +%s)
 PROBLEMS=()
 problem() { PROBLEMS+=("$1"); echo "PROBLEM: $1"; }
 
-# notify "title" "message" [open-report]
+# notify "title" "message" [link]
 #  uses terminal-notifier when installed (own icon in Notification settings,
-#  banner replaces the previous one, click opens the report); else osascript
+#  banner replaces the previous one, click opens the link); else osascript.
+#  The text is passed as arguments, never pasted into the script, so quotes
+#  and backslashes in names can't break it.
 notify() {
   if command -v terminal-notifier >/dev/null 2>&1; then
     local args=(-title "iPod" -subtitle "$1" -message "${2:- }" -group ipod-sync)
-    [ -n "$3" ] && [ -f "$REPORT" ] && args+=(-open "file://${REPORT// /%20}")
+    [ -n "${3:-}" ] && args+=(-open "$3")
     terminal-notifier "${args[@]}" >/dev/null 2>&1 && return
   fi
-  osascript -e "display notification \"${2//\"/}\" with title \"iPod\" subtitle \"${1//\"/}\"" 2>/dev/null
+  osascript -e 'on run argv' \
+            -e 'display notification (item 2 of argv) with title "iPod" subtitle (item 1 of argv)' \
+            -e 'end run' "$1" "${2:- }" >/dev/null 2>&1
 }
 sound() {   # start | done | problem
   [ "$SOUNDS" = "yes" ] || return
@@ -305,15 +309,18 @@ if [ -x "$PYTHON" ]; then
   SUMMARY=$(tools summary --files-list "$CHANGES" --started "$STARTED" "${EJECTED[@]}" \
             --problems "$PROB_TEXT" --warnings "$(printf '%s\n' "${WARNINGS[@]}")" --report-dir "$REPORT_DIR" --lastfm-user "$LASTFM_USER")
   STATUS=$(sed -n 1p <<<"$SUMMARY"); TITLE=$(sed -n 2p <<<"$SUMMARY"); DETAIL=$(sed -n 3p <<<"$SUMMARY")
-else
-  STATUS="error"; TITLE="iPod sync finished with problems"; DETAIL="${PROBLEMS[0]}"
+  REPORT_URL=$(sed -n 5p <<<"$SUMMARY")
+fi
+if [ -z "${TITLE:-}" ]; then              # no Python, or the summary step itself failed
+  STATUS="error"; TITLE="iPod sync finished with problems"; REPORT_URL=""
+  DETAIL="${PROBLEMS[0]:-The sync report could not be made - see ~/Library/Logs/ipod-sync.log}"
 fi
 echo "Summary: $TITLE - $DETAIL"
 case "$STATUS" in
   ok|dry) sound "done" ;;
   *)      sound problem ;;
 esac
-notify "$TITLE" "$DETAIL" open
+notify "$TITLE" "$DETAIL" "$REPORT_URL"
 if [ -f "$REPORT" ] && { [ "$OPEN_REPORT" = "always" ] || { [ "$OPEN_REPORT" = "problems" ] && { [ "$STATUS" = "warn" ] || [ "$STATUS" = "error" ]; }; }; }; then
   open "$REPORT"
 fi

@@ -18,6 +18,7 @@ import argparse
 import glob
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -1048,9 +1049,11 @@ def cmd_summary(a):
     with open(hist_path, encoding="utf-8") as fh:
         for line in fh:
             try:
-                history.append(json.loads(line))
-            except Exception:
-                pass
+                h = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(h, dict) and "when" in h:
+                history.append(h)
     history = history[-20:][::-1]
 
     # ---- HTML report
@@ -1091,8 +1094,8 @@ def cmd_summary(a):
     sections.append("<section><h2>Playlists</h2>%s</section>" % table(
         [(x["name"], x["tracks"], x["missing"] or "") for x in lists], ["Playlist", "Tracks", "Not on iPod"]))
     sections.append("<section><h2>Recent syncs</h2>%s</section>" % table(
-        [(h["when"], h["mode"], h["added"], h["removed"], h["scrobbled"],
-          "⚠ %d" % h["problems"] if h["problems"] else "✓") for h in history],
+        [(h["when"], h.get("mode", ""), h.get("added", ""), h.get("removed", ""), h.get("scrobbled", ""),
+          "⚠ %s" % h["problems"] if h.get("problems") else "✓") for h in history],
         ["When", "Type", "Added", "Removed", "Scrobbled", "Status"]))
     page = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>iPod sync - %(when)s</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1130,6 +1133,7 @@ th,td{padding:6px 8px;border-bottom:1px solid var(--line)}tr:last-child td{borde
     print(title)
     print(detail)
     print(report)
+    print(pathlib.Path(report).as_uri())     # for the notification's click-to-open link
     return 0
 
 

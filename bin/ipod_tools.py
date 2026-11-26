@@ -930,7 +930,11 @@ def cmd_prune(a):
         log("Prune: %d files would be deleted from the iPod (list: %s)" % (len(doomed), listing))
         return 0
     for rel in doomed:
-        os.remove(os.path.join(music, rel))
+        try:
+            os.remove(os.path.join(music, rel))
+        except OSError as err:          # unplugged, or read-only
+            log("Prune: stopped - couldn't delete %s (%s)" % (rel, err))
+            return 1
     removed_dirs = 0
     for d, dirs, files in os.walk(music, topdown=False):
         if d == music:
@@ -1072,6 +1076,8 @@ def cmd_summary(a):
     detail = " · ".join(parts) or "Already up to date · no new plays"
     if dry:
         status, title = "dry", "iPod dry run finished"
+    elif a.gone:
+        status, title = "error", "iPod was unplugged during the sync"
     elif problems and not a.ejected:
         status, title = "error", "iPod sync problem - eject in Finder before unplugging"
     elif problems:
@@ -1208,6 +1214,7 @@ def main():
     ap.add_argument("--warnings", default="", help="summary: newline-separated settings warnings")
     ap.add_argument("--started", help="summary: start time (epoch seconds)")
     ap.add_argument("--ejected", action="store_true", help="summary: the iPod was ejected")
+    ap.add_argument("--gone", action="store_true", help="summary: the iPod was unplugged part-way")
     ap.add_argument("--report-dir", default=os.path.join(home, "Music", "iPod Sync"))
     ap.add_argument("--lastfm-user", default="")
     ap.add_argument("--log-dir", default=os.path.join(home, "Library", "Logs"), help="where the file lists go")

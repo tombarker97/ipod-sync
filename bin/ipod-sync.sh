@@ -115,6 +115,13 @@ REPORT="$REPORT_DIR/Last sync.html"
 STARTED=$(date +%s)
 PROBLEMS=()
 problem() { PROBLEMS+=("$1"); echo "PROBLEM: $1"; }
+ipod_here() { [ -d "$IPOD/.rockbox" ]; }
+GONE=()
+unplugged() {   # the iPod disappeared part-way (noted once)
+  [ ${#GONE[@]} -gt 0 ] && return
+  GONE=(--gone)
+  problem "The iPod was unplugged during the sync - plug it back in to finish (nothing is lost)"
+}
 
 # notify "title" "message" [link]
 #  uses terminal-notifier when installed (own icon in Notification settings,
@@ -266,29 +273,49 @@ if [ "$DO_FILES" = "yes" ]; then
   FLAGS=(-rt -8 --modify-window=2 --exclude='.*' --itemize-changes)
   [ "$DRY_RUN" = "yes" ] && FLAGS+=(--dry-run)
   [ "$DRY_RUN" = "yes" ] || mkdir -p "$DEST"
-  if rsync "${FLAGS[@]}" "$SRC" "$DEST" > "$CHANGES"; then
+  COPY_ERRORS="$LOG_DIR/ipod-sync-copy-errors.txt"
+  if rsync "${FLAGS[@]}" "$SRC" "$DEST" > "$CHANGES" 2> "$COPY_ERRORS"; then
     echo "Files: $(grep -c '^>f' "$CHANGES") to copy/update (list: $CHANGES)"
-    if [ -x "$PYTHON" ]; then tools prune || problem "Removing old songs from the iPod was skipped (see log)"; fi
   else
-    tail -20 "$CHANGES"; problem "Copying music to the iPod failed part-way (see log)"
+    tail -20 "$CHANGES"; tail -20 "$COPY_ERRORS"
+    if ! ipod_here; then
+      unplugged
+    elif grep -q 'No space left on device' "$COPY_ERRORS"; then
+      problem "The iPod is full - some songs weren't copied. Remove music from your library (or make room on the iPod) and sync again"
+    elif grep -q 'Read-only file system' "$COPY_ERRORS"; then
+      problem "The iPod is read-only - nothing could be copied (run First Aid on it in Disk Utility)"
+    else
+      problem "Copying music to the iPod failed part-way (see log)"
+    fi
+  fi
+  # remove songs that are no longer in the library - even after a failed copy
+  # (on a full iPod that makes room for next time), but not once it's gone
+  if [ -x "$PYTHON" ] && ipod_here; then
+    tools prune || problem "Removing old songs from the iPod was skipped (see log)"
   fi
 fi
 
 # ---- 5. playlists ----------------------------------------------------------
-if [ "$DO_PLAYLISTS" = "yes" ]; then
+if [ "$DO_PLAYLISTS" = "yes" ] && ipod_here; then
   tools playlists-push || problem "Playlists weren't updated (see log)"
 fi
 
 # ---- 6. report anything outside /Music -------------------------------------
-[ -x "$PYTHON" ] && tools report
+[ -x "$PYTHON" ] && ipod_here && tools report
 
 # ---- 7. tidy, flush, eject -------------------------------------------------
 EJECTED=()
-if [ "$DRY_RUN" != "yes" ]; then
+ipod_here || unplugged
+if [ "$DRY_RUN" != "yes" ] && ipod_here; then
   # remove macOS '._' shadow files from the folders we manage
   N=$(find "$IPOD/Music" "$IPOD/Playlists" -name '._*' -type f 2>/dev/null | wc -l | tr -d ' ')
   find "$IPOD/Music" "$IPOD/Playlists" -name '._*' -type f -delete 2>/dev/null
   echo "Tidy: removed $N '._' files"
+  # and half-copied files rsync leaves behind if a sync is interrupted
+  # (".01 Song.mp3.a1B2c3"; the sync never copies hidden files, so these are safe to remove)
+  N=$(find "$IPOD/Music" -name '.*.??????' -type f 2>/dev/null | wc -l | tr -d ' ')
+  find "$IPOD/Music" -name '.*.??????' -type f -delete 2>/dev/null
+  [ "$N" -gt 0 ] && echo "Tidy: removed $N half-copied files left by an interrupted sync"
   sync
   if [ ${#PROBLEMS[@]} -eq 0 ] && [ "$EJECT" = "yes" ]; then
     if diskutil eject "$IPOD" >/dev/null; then
@@ -308,7 +335,7 @@ fi
 # ---- 9. summary notification + report page -----------------------------------
 if [ -x "$PYTHON" ]; then
   PROB_TEXT=$(printf '%s\n' "${PROBLEMS[@]}")
-  SUMMARY=$(tools summary --files-list "$CHANGES" --started "$STARTED" "${EJECTED[@]}" \
+  SUMMARY=$(tools summary --files-list "$CHANGES" --started "$STARTED" "${EJECTED[@]}" "${GONE[@]}" \
             --problems "$PROB_TEXT" --warnings "$(printf '%s\n' "${WARNINGS[@]}")" --report-dir "$REPORT_DIR" --lastfm-user "$LASTFM_USER")
   STATUS=$(sed -n 1p <<<"$SUMMARY"); TITLE=$(sed -n 2p <<<"$SUMMARY"); DETAIL=$(sed -n 3p <<<"$SUMMARY")
   REPORT_URL=$(sed -n 5p <<<"$SUMMARY")

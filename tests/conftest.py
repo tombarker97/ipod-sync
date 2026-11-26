@@ -174,7 +174,7 @@ class Sandbox:
         self.check_safe()
         e = dict(self.env)
         e.update(env or {})
-        return subprocess.run([shell, SCRIPT, *args], env=e, stdout=subprocess.PIPE,
+        return subprocess.run([shell, SCRIPT, *args], env=e, cwd=self.root, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True, timeout=timeout)
 
     def tools(self, *args, env=None):

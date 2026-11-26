@@ -127,13 +127,22 @@ if [ "$DRY_RUN" = "yes" ]; then notify "Dry run started…" "Nothing will be cha
 else notify "Syncing… don't unplug" "Collecting plays, copying music, updating playlists"; fi
 
 # ---- 2. back up Rockbox settings (last 10 kept) ---------------------------
+case "$KEEP_BACKUPS" in ''|*[!0-9]*|0) echo "WARNING: KEEP_BACKUPS=\"$KEEP_BACKUPS\" isn't a number from 1 up - using 10"; KEEP_BACKUPS=10 ;; esac
 if [ "$DRY_RUN" != "yes" ]; then
-  STAMP="$BACKUP/$(date +%F_%H%M)"
-  mkdir -p "$STAMP"
-  cp "$IPOD/.rockbox/config.cfg" "$STAMP/" 2>/dev/null
-  [ -d "$IPOD/Playlists" ] && rsync -a "$IPOD/Playlists/" "$STAMP/Playlists/"
-  ls -1d "$BACKUP"/*/ 2>/dev/null | sort -r | tail -n +$((KEEP_BACKUPS + 1)) | while IFS= read -r d; do rm -rf "$d"; done
-  echo "Backup: settings and playlists saved to $STAMP"
+  case "$BACKUP" in
+    ""|/|"$HOME"|"$HOME/"|[!/]*)       # empty, the whole disk, your home folder, or not a full path
+      problem "BACKUP=\"$BACKUP\" isn't a usable folder - Rockbox settings weren't backed up (set it to e.g. \$HOME/Music/RockboxBackup)" ;;
+    *)
+      STAMP="$BACKUP/$(date +%F_%H%M)"
+      mkdir -p "$STAMP"
+      cp "$IPOD/.rockbox/config.cfg" "$STAMP/" 2>/dev/null
+      [ -d "$IPOD/Playlists" ] && rsync -a "$IPOD/Playlists/" "$STAMP/Playlists/"
+      # delete old backups - only folders this script made (named like 2026-11-26_1735)
+      find "$BACKUP" -mindepth 1 -maxdepth 1 -type d \
+           -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_[0-9][0-9][0-9][0-9]' | sort -r |
+        tail -n +$((KEEP_BACKUPS + 1)) | while IFS= read -r d; do rm -rf "$d"; done
+      echo "Backup: settings and playlists saved to $STAMP" ;;
+  esac
 fi
 
 # ---- 3. collect plays (before the file sync, which may delete duplicates) --

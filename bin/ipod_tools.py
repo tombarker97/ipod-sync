@@ -393,7 +393,12 @@ def cmd_scrobble_collect(a):
     entries, resumed = dedupe_resumes(entries)
 
     lib_idx = index_tree(a.library)
-    dir_cache = {}
+    dir_cache, tag_cache = {}, {}
+
+    def tags(path):                      # each file is read once, however often it was played
+        if path not in tag_cache:
+            tag_cache[path] = read_tags(path)
+        return tag_cache[path]
     plays, short = [], 0
     for e in entries:
         if not counts_as_play(e["length_ms"], e["elapsed_ms"]):
@@ -403,15 +408,15 @@ def cmd_scrobble_collect(a):
         meta, source = None, ""
         lib_rel = lib_idx.get(nkey(rel))
         if lib_rel:
-            meta, source = read_tags(os.path.join(a.library, lib_rel)), "library"
+            meta, source = tags(os.path.join(a.library, lib_rel)), "library"
         if meta is None:
             moved = find_renamed(rel, lib_idx, dir_cache)
             if moved:
-                meta, source = read_tags(os.path.join(a.library, moved)), "library (renamed)"
+                meta, source = tags(os.path.join(a.library, moved)), "library (renamed)"
         if meta is None:
             ip = os.path.join(a.ipod, e["path"].lstrip("/"))
             if os.path.exists(ip):
-                meta, source = read_tags(ip), "ipod"
+                meta, source = tags(ip), "ipod"
         if meta is None or not meta["artist"] or not meta["title"]:
             meta, source = tags_from_path(rel), "filename"
         start_local = e["ts"] - int(round(e["elapsed_ms"] / 1000))

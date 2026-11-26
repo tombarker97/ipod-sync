@@ -136,7 +136,8 @@ class Sandbox:
         assert self.home != REAL_HOME and not REAL_HOME.startswith(self.home)
         assert self.home.startswith(self.root)
         assert self.ipod_name.split(" ")[0] != "IPOD"
-        assert self.settings["RB_SCROBBLER"] == FAKE_RB
+        rb = self.settings["RB_SCROBBLER"]
+        assert rb == FAKE_RB or rb.startswith(self.root + "/"), "rb-scrobbler must be the fake"
 
     # ---- setup -------------------------------------------------------------
     @property

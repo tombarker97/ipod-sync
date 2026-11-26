@@ -44,6 +44,9 @@ FOUR_MIN_MS = 240_000           # ...and played for half its length or 4 min
 MAX_AGE_S = 14 * 86400 - 3600   # Last.fm accepts up to 14 days; keep 1 h margin
 FUTURE_SLACK_S = 600
 CLOCK_FLOOR = 1420070400        # 2015-01-01: anything earlier = clock not set
+LEDGER_DAYS = 60                # forget processed plays after this; they're far too old for Last.fm by then
+HISTORY_LINES = 200             # sync history entries kept
+DRY_RUN_PREVIEWS = 10           # dry-run preview folders kept
 
 
 def log(msg=""):
@@ -318,6 +321,39 @@ def load_ledger(path):
         return {l.rstrip("\n") for l in fh if l.strip()}
 
 
+def ledger_time(key):
+    """The (iPod clock) time in a ledger entry, or None if it can't be read."""
+    try:
+        if key.startswith("legacy:"):
+            return int(key[len("legacy:"):].split("\t")[6])
+        return int(key.split(":", 1)[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def trim_ledger(path, now):
+    """Drop entries older than LEDGER_DAYS. If such a play were ever read again
+    it would be held back as too old (Last.fm takes 14 days), so this can't
+    cause duplicates - it only stops the file growing forever."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        lines = [x for x in fh if x.strip()]
+    cutoff = now - LEDGER_DAYS * 86400
+    keep = [x for x in lines if (ledger_time(x.rstrip("\n")) or now) >= cutoff]
+    if len(keep) < len(lines):
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            fh.writelines(keep)
+        os.replace(path + ".tmp", path)
+
+
+def keep_newest(folder, n):
+    """Delete all but the n newest (by name) sub-folders of folder."""
+    if os.path.isdir(folder):
+        for d in sorted(x for x in os.listdir(folder) if os.path.isdir(os.path.join(folder, x)))[:-n]:
+            shutil.rmtree(os.path.join(folder, d), ignore_errors=True)
+
+
 def cmd_scrobble_collect(a):
     now = int(time.time())
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -334,6 +370,8 @@ def cmd_scrobble_collect(a):
         return 0
 
     out_dir = os.path.join(a.data, "dry-run", stamp) if a.dry_run else a.data
+    if a.dry_run:
+        keep_newest(os.path.join(a.data, "dry-run"), DRY_RUN_PREVIEWS - 1)
     for sub in ("raw", "pending", "unsubmittable", "reports"):
         os.makedirs(os.path.join(out_dir, sub) if not a.dry_run else out_dir, exist_ok=True)
     def dest(sub, name):
@@ -435,6 +473,7 @@ def cmd_scrobble_collect(a):
         with open(ledger_path, "a", encoding="utf-8") as fh:
             for k in new_keys + [e["key"] for e in legacy_entries]:
                 fh.write(k + "\n")
+        trim_ledger(ledger_path, now)
 
     log("Scrobbles: read %d log entries (+%d bad lines), %d already processed, "
         "%d resume duplicates, %d too short/skipped" % (total_read, bad, already, resumed, short))
@@ -1045,6 +1084,12 @@ def cmd_summary(a):
              "scrobbled": scrobbled, "held": held, "problems": len(problems), "seconds": took}
     with open(hist_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
+    with open(hist_path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    if len(lines) > HISTORY_LINES:
+        with open(hist_path + ".tmp", "w", encoding="utf-8") as fh:
+            fh.writelines(lines[-HISTORY_LINES:])
+        os.replace(hist_path + ".tmp", hist_path)
     history = []
     with open(hist_path, encoding="utf-8") as fh:
         for line in fh:

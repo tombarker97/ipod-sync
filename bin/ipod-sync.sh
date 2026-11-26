@@ -142,6 +142,8 @@ sound() {   # start | done | problem
 }
 
 mkdir -p "$LOG_DIR" "$REPORT_DIR"
+# start a new log past ~2 MB, keeping one old copy (ipod-sync.log.1)
+if [ -f "$LOG" ] && [ "$(stat -f %z "$LOG")" -gt 2000000 ]; then mv -f "$LOG" "$LOG.1"; fi
 if [ "$MANUAL" = "yes" ]; then
   exec > >(tee -a "$LOG") 2>&1            # by hand: show output and log it
 else

@@ -124,6 +124,7 @@ class Sandbox:
             "VOLUMES": self.volumes,
             "SANDBOX_ROOT": self.root,
             "IPOD_SYNC_MOUNT_DELAY": "0",
+            "IPOD_SYNC_ALLOW_FOLDER": "yes",       # the fake iPod is a folder, not a mounted drive
             "REAL_RSYNC": real_rsync(),
             "FAKE_RB_RECORD": os.path.join(self.root, "lastfm-accepted.jsonl"),
         }

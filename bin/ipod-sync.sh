@@ -107,10 +107,10 @@ esac
 
 # IPOD_SYNC_PATH_PREFIX lets the tests put stand-in commands first
 export PATH="${IPOD_SYNC_PATH_PREFIX:+$IPOD_SYNC_PATH_PREFIX:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-IPOD="${VOLUMES:-/Volumes}/$IPOD_NAME"
+VOLS="${VOLUMES:-/Volumes}"
+IPOD="$VOLS/$IPOD_NAME"                   # (may become "IPOD 1" - see detect)
 LOCK="${IPOD_SYNC_LOCK:-/tmp/ipod-sync.lock}"
 LOG_DIR="$(dirname "$LOG")"
-DEST="$IPOD/Music/"
 REPORT="$REPORT_DIR/Last sync.html"
 STARTED=$(date +%s)
 PROBLEMS=()
@@ -150,11 +150,33 @@ if [ -n "$SETTINGS_ERROR" ]; then
 fi
 
 # ---- 1. detect --------------------------------------------------------------
-[ -d "$IPOD/.rockbox" ] || { [ "$MANUAL" = "yes" ] && echo "iPod not mounted at $IPOD"; exit 0; }
-if ! ls "$IPOD/.rockbox" >/dev/null 2>&1; then
-  MSG="macOS blocked access to the iPod. Allow 'iPod Sync' in System Settings > Privacy & Security > Files and Folders (Removable Volumes)."
-  echo "$MSG"; sound problem; notify "iPod Sync can't read the iPod" "$MSG"; exit 1
+# Look for the iPod's name - or "IPOD 1", "IPOD 2"..., which is what macOS calls
+# it when another drive already has that name. Only a drive with a .rockbox
+# folder counts, and it must really be a mounted drive (not a leftover folder).
+FOUND=(); BLOCKED=""
+for v in "$VOLS/$IPOD_NAME" "$VOLS/$IPOD_NAME "[0-9]*; do
+  [ -e "$v" ] || continue
+  if ! ls "$v" >/dev/null 2>&1; then BLOCKED="$v"; continue; fi    # there, but we may not look inside
+  [ -d "$v/.rockbox" ] || continue
+  if [ "$(stat -f %d "$v")" = "$(stat -f %d "$VOLS")" ] && [ "${IPOD_SYNC_ALLOW_FOLDER:-}" != "yes" ]; then
+    echo "$v is a folder on this Mac, not a mounted drive - ignored"; continue
+  fi
+  FOUND+=("$v")
+done
+if [ ${#FOUND[@]} -gt 1 ]; then
+  MSG="${#FOUND[@]} drives called $IPOD_NAME with Rockbox are plugged in - unplug one and try again"
+  echo "$MSG"; sound problem; notify "iPod sync didn't start" "$MSG"; exit 1
 fi
+if [ ${#FOUND[@]} -eq 0 ]; then
+  if [ -n "$BLOCKED" ]; then
+    MSG="macOS blocked access to the iPod. Allow 'iPod Sync' in System Settings > Privacy & Security > Files and Folders (Removable Volumes)."
+    echo "$MSG"; sound problem; notify "iPod Sync can't read the iPod" "$MSG"; exit 1
+  fi
+  [ "$MANUAL" = "yes" ] && echo "iPod not mounted at $IPOD"
+  exit 0
+fi
+IPOD="${FOUND[0]}"
+DEST="$IPOD/Music/"
 if [ "${CHECK:-}" = "yes" ]; then     # used by install.sh to trigger macOS's permission prompt
   echo "OK: can read $IPOD"; notify "iPod Sync can read your iPod" "Automatic sync is ready"; exit 0
 fi

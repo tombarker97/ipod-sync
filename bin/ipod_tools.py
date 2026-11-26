@@ -776,7 +776,7 @@ def cmd_prune(a):
             rel = os.path.relpath(os.path.join(d, f), music).replace(os.sep, "/")
             if nkey(rel) not in lib:
                 doomed.append(rel)
-    listing = os.path.join(os.path.expanduser("~"), "Library", "Logs", "ipod-sync-prune.txt")
+    listing = os.path.join(a.log_dir, "ipod-sync-prune.txt")
     os.makedirs(os.path.dirname(listing), exist_ok=True)
     with open(listing, "w", encoding="utf-8") as fh:
         fh.write("\n".join(doomed) + ("\n" if doomed else ""))
@@ -1056,6 +1056,7 @@ def main():
     ap.add_argument("--ejected", action="store_true", help="summary: the iPod was ejected")
     ap.add_argument("--report-dir", default=os.path.join(home, "Music", "iPod Sync"))
     ap.add_argument("--lastfm-user", default="")
+    ap.add_argument("--log-dir", default=os.path.join(home, "Library", "Logs"), help="where the file lists go")
     a = ap.parse_args()
     if mutagen is None and a.command in ("scrobble-collect", "playlists-export"):
         log("WARNING: mutagen not installed - tags will be guessed from file names")

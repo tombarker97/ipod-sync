@@ -55,8 +55,11 @@ case "$1" in
     echo "settings: $CONFIG    log: $LOG"; exit 0 ;;
 esac
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# IPOD_SYNC_PATH_PREFIX lets the tests put stand-in commands first
+export PATH="${IPOD_SYNC_PATH_PREFIX:+$IPOD_SYNC_PATH_PREFIX:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 IPOD="${VOLUMES:-/Volumes}/$IPOD_NAME"
+LOCK="${IPOD_SYNC_LOCK:-/tmp/ipod-sync.lock}"
+LOG_DIR="$(dirname "$LOG")"
 DEST="$IPOD/Music/"
 REPORT="$REPORT_DIR/Last sync.html"
 STARTED=$(date +%s)
@@ -84,7 +87,7 @@ sound() {   # start | done | problem
   [ -f "$f" ] && (afplay "$f" >/dev/null 2>&1 &)
 }
 
-mkdir -p "$(dirname "$LOG")" "$REPORT_DIR"
+mkdir -p "$LOG_DIR" "$REPORT_DIR"
 if [ "$MANUAL" = "yes" ]; then
   exec > >(tee -a "$LOG") 2>&1            # by hand: show output and log it
 else
@@ -101,14 +104,14 @@ fi
 if [ "${CHECK:-}" = "yes" ]; then     # used by install.sh to trigger macOS's permission prompt
   echo "OK: can read $IPOD"; notify "iPod Sync can read your iPod" "Automatic sync is ready"; exit 0
 fi
-mkdir /tmp/ipod-sync.lock 2>/dev/null || { echo "already running"; exit 0; }
+mkdir "$LOCK" 2>/dev/null || { echo "already running"; exit 0; }
 RUN=$(mktemp "${TMPDIR:-/tmp}/ipod-sync-run.XXXXXX")
 export IPOD_SYNC_RUN="$RUN"
-trap 'rmdir /tmp/ipod-sync.lock; rm -f "$RUN"' EXIT
+trap 'rmdir "$LOCK"; rm -f "$RUN"' EXIT
 
 DRY_FLAG=(); [ "$DRY_RUN" = "yes" ] && DRY_FLAG=(--dry-run)
 tools() { "$PYTHON" "$TOOLS" "$1" --ipod "$IPOD" --library "${SRC%/}" --data "$SCROBBLES" \
-          --playlists "$PLAYLISTS" --tz "$IPOD_TZ" --rb-scrobbler "$RB_SCROBBLER" "${DRY_FLAG[@]}" "${@:2}"; }
+          --playlists "$PLAYLISTS" --tz "$IPOD_TZ" --rb-scrobbler "$RB_SCROBBLER" --log-dir "$LOG_DIR" "${DRY_FLAG[@]}" "${@:2}"; }
 
 echo
 echo "===== $(date '+%F %T') iPod mounted $( [ "$DRY_RUN" = "yes" ] && echo '(DRY RUN - nothing will change)')"
@@ -139,7 +142,7 @@ if [ "$DO_SCROBBLES" = "yes" ]; then
 fi
 
 # ---- 4. mirror the library onto /Music ------------------------------------
-CHANGES="$HOME/Library/Logs/ipod-sync-files.txt"     # full per-file list
+CHANGES="$LOG_DIR/ipod-sync-files.txt"     # full per-file list
 : > "$CHANGES"
 if [ "$DO_FILES" = "yes" ]; then
   # no --delete: rsync compares accented names byte-for-byte and would delete

@@ -194,8 +194,12 @@ class Sandbox:
         self.check_safe()
         e = dict(self.env)
         e.update(env or {})
-        return subprocess.run([shell, SCRIPT, *args], env=e, cwd=self.root, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        r = subprocess.run([shell, SCRIPT, *args], env=e, cwd=self.root, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, text=True, timeout=timeout)
+        logged = self.logtext() if os.path.exists(self.log) else ""
+        bugs = [x for x in (r.stdout + logged).splitlines() if "ipod-sync.sh: line" in x and "unbound variable" in x]
+        assert not bugs, bugs                     # set -u caught a bug in the script
+        return r
 
     def tools(self, *args, env=None):
         self.check_safe()

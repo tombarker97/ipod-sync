@@ -48,7 +48,7 @@ if ! command -v terminal-notifier >/dev/null 2>&1; then
     brew install terminal-notifier
   fi
 fi
-command -v terminal-notifier >/dev/null 2>&1 && ok "terminal-notifier" || note "Using macOS's built-in notifications"
+if command -v terminal-notifier >/dev/null 2>&1; then ok "terminal-notifier"; else note "Using macOS's built-in notifications"; fi
 
 PY="${IPOD_SYNC_PY:-/usr/bin/python3}"      # (tests point this at a stand-in)
 "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null \
@@ -67,6 +67,7 @@ fi
 "$HOME_DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade mutagen
 ok "Python environment (mutagen, for reading tags)"
 mkdir -p "$(dirname "$SHIM")"
+# shellcheck disable=SC2016  # $HOME and $@ are meant for the little script, not for now
 printf '#!/bin/bash\nexec "$HOME/.ipod-sync/ipod-sync.sh" "$@"\n' > "$SHIM"
 chmod 755 "$SHIM"
 ok "Command: ipod-sync  (in ~/.local/bin)"
@@ -150,7 +151,7 @@ if [ -x "$RB" ]; then
     ok "Already connected to Last.fm"
   elif yes_no "Connect to Last.fm now? (opens a link to approve; your password is never handled)" "y"; then
     "$RB" -auth || true      # it complains about a missing -f afterwards; that's expected
-    [ -f "$RB_KEY" ] && ok "Connected to Last.fm" || note "Not connected - run: $RB -auth"
+    if [ -f "$RB_KEY" ]; then ok "Connected to Last.fm"; else note "Not connected - run: $RB -auth"; fi
   fi
 else
   note "Skipped - plays will be collected and queued until rb-scrobbler is installed"
@@ -176,7 +177,7 @@ fi
 bold "5/6  Starting automatic sync"
 UID_NUM="$(id -u)"
 for old in "$HOME"/Library/LaunchAgents/*.plist; do
-  [ -f "$old" ] && [ "$old" != "$PLIST" ] && grep -q "ipod-sync.sh" "$old" 2>/dev/null || continue
+  if [ ! -f "$old" ] || [ "$old" = "$PLIST" ] || ! grep -q "ipod-sync.sh" "$old" 2>/dev/null; then continue; fi
   note "Found an older iPod sync job: $(basename "$old")"
   if yes_no "Turn it off so the two don't both run?" "y"; then
     launchctl bootout "gui/$UID_NUM" "$old" 2>/dev/null || true

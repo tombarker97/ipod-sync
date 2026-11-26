@@ -821,7 +821,7 @@ def build_tag_index(library, cache_path):
         except Exception:
             cache = {}
     idx, fresh = index_tree(library), {}
-    for k, rel in idx.items():
+    for rel in idx.values():
         p = os.path.join(library, rel)
         st = os.stat(p)
         sig = "%d:%d" % (st.st_size, int(st.st_mtime))
@@ -936,7 +936,7 @@ def cmd_prune(a):
             log("Prune: stopped - couldn't delete %s (%s)" % (rel, err))
             return 1
     removed_dirs = 0
-    for d, dirs, files in os.walk(music, topdown=False):
+    for d, _dirs, _files in os.walk(music, topdown=False):
         if d == music:
             continue
         left = os.listdir(d)

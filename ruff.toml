@@ -1,0 +1,6 @@
+# Python 3.9 is what macOS's Command Line Tools provide
+target-version = "py39"
+line-length = 120
+
+[lint]
+select = ["F", "B", "E9"]

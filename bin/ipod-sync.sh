@@ -44,14 +44,15 @@ warn() { WARNINGS+=("$1"); }
 if [ -f "$CONFIG" ]; then
   # try the settings file in a throw-away shell first, so a typo (a missing
   # quote, a $NAME that isn't set) stops the sync instead of half-applying
+  # shellcheck source=/dev/null
   SETTINGS_ERROR=$( (set -u; . "$CONFIG") 2>&1 >/dev/null ) || settings_error "$CONFIG can't be read"
   # shellcheck source=/dev/null
   [ -z "$SETTINGS_ERROR" ] && . "$CONFIG"
   KNOWN=" IPOD_NAME DRY_RUN SRC PLAYLISTS BACKUP SCROBBLES REPORT_DIR IPOD_TZ LOG DO_SCROBBLES DO_FILES
           DO_PLAYLISTS EJECT KEEP_BACKUPS SOUNDS OPEN_REPORT LASTFM_USER PYTHON RB_SCROBBLER "
-  for name in $(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$CONFIG"); do
+  while IFS= read -r name; do
     case "$KNOWN" in *[[:space:]]"$name"[[:space:]]*) ;; *) warn "Unknown setting $name in $CONFIG (a typo?) - ignored" ;; esac
-  done
+  done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$CONFIG")
 fi
 TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ipod_tools.py"
 
@@ -92,14 +93,19 @@ case "$IPOD_NAME" in ""|.|..|*/*)
 esac
 # ---------------------------------------------------------------------------
 
+# From here on, using a variable that was never set is an error (it's usually
+# a typo). Note: bash 3.2 treats an empty list as "not set", hence the
+# ${LIST[@]+"${LIST[@]}"} spelling below - it means "the list, if it has anything".
+set -u
+
 MANUAL="no"
-case "$1" in
+case "${1:-}" in
   --dry-run) DRY_RUN="yes"; MANUAL="yes" ;;
   --real)    DRY_RUN="no";  MANUAL="yes" ;;
   --check)   CHECK="yes";   MANUAL="yes" ;;
   --export-playlists)   # one-off: copy Music.app playlists into $PLAYLISTS
     exec "$PYTHON" "$TOOLS" playlists-export --library "${SRC%/}" --playlists "$PLAYLISTS" \
-         --data "$SCROBBLES" "${@:2}" ;;
+         --data "$SCROBBLES" ${2+"${@:2}"} ;;
   -h|--help)
     echo "usage: ipod-sync [--dry-run | --real | --check | --export-playlists [--include-smart]]"
     echo "settings: $CONFIG    log: $LOG"; exit 0 ;;
@@ -220,11 +226,11 @@ trap 'rm -rf "$LOCK"; rm -f "$RUN"' EXIT
 
 DRY_FLAG=(); [ "$DRY_RUN" = "yes" ] && DRY_FLAG=(--dry-run)
 tools() { "$PYTHON" "$TOOLS" "$1" --ipod "$IPOD" --library "${SRC%/}" --data "$SCROBBLES" \
-          --playlists "$PLAYLISTS" --tz "$IPOD_TZ" --rb-scrobbler "$RB_SCROBBLER" --log-dir "$LOG_DIR" "${DRY_FLAG[@]}" "${@:2}"; }
+          --playlists "$PLAYLISTS" --tz "$IPOD_TZ" --rb-scrobbler "$RB_SCROBBLER" --log-dir "$LOG_DIR" ${DRY_FLAG[@]+"${DRY_FLAG[@]}"} ${2+"${@:2}"}; }
 
 echo
 echo "===== $(date '+%F %T') iPod mounted $( [ "$DRY_RUN" = "yes" ] && echo '(DRY RUN - nothing will change)')"
-for w in "${WARNINGS[@]}"; do echo "WARNING: $w"; done
+for w in ${WARNINGS[@]+"${WARNINGS[@]}"}; do echo "WARNING: $w"; done
 fail() { echo "$1"; sound problem; notify "iPod sync couldn't start" "$1"; exit 1; }
 rsync --version 2>/dev/null | grep -q 'version 3' || fail "Homebrew rsync not found - run: brew install rsync"
 [ -d "$SRC" ] || fail "Music Library folder not found: $SRC"
@@ -334,9 +340,10 @@ fi
 
 # ---- 9. summary notification + report page -----------------------------------
 if [ -x "$PYTHON" ]; then
-  PROB_TEXT=$(printf '%s\n' "${PROBLEMS[@]}")
-  SUMMARY=$(tools summary --files-list "$CHANGES" --started "$STARTED" "${EJECTED[@]}" "${GONE[@]}" \
-            --problems "$PROB_TEXT" --warnings "$(printf '%s\n' "${WARNINGS[@]}")" --report-dir "$REPORT_DIR" --lastfm-user "$LASTFM_USER")
+  PROB_TEXT=$(printf '%s\n' ${PROBLEMS[@]+"${PROBLEMS[@]}"})
+  WARN_TEXT=$(printf '%s\n' ${WARNINGS[@]+"${WARNINGS[@]}"})
+  SUMMARY=$(tools summary --files-list "$CHANGES" --started "$STARTED" ${EJECTED[@]+"${EJECTED[@]}"} \
+            ${GONE[@]+"${GONE[@]}"} --problems="$PROB_TEXT" --warnings="$WARN_TEXT" --report-dir "$REPORT_DIR" --lastfm-user "$LASTFM_USER")
   STATUS=$(sed -n 1p <<<"$SUMMARY"); TITLE=$(sed -n 2p <<<"$SUMMARY"); DETAIL=$(sed -n 3p <<<"$SUMMARY")
   REPORT_URL=$(sed -n 5p <<<"$SUMMARY")
 fi

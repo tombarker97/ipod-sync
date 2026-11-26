@@ -631,15 +631,21 @@ MANIFEST = ".mac-playlists.txt"
 
 
 def cmd_playlists_push(a):
+    if not os.path.isdir(a.playlists):
+        if not os.path.exists(os.path.join(a.ipod, "Playlists", MANIFEST)):
+            log("Playlists: none found in %s" % a.playlists)       # not using playlists - fine
+            return 0
+        log("Playlists: folder %s not found (on a drive that isn't plugged in?) - iPod playlists left unchanged"
+            % a.playlists)
+        return 1
     src = sorted(glob.glob(os.path.join(a.playlists, "*.m3u8")) + glob.glob(os.path.join(a.playlists, "*.m3u")))
     dst = os.path.join(a.ipod, "Playlists")
     ipod_idx = index_tree(os.path.join(a.ipod, "Music"))
     if not ipod_idx:
-        log("Playlists: can't see any music on the iPod - playlists left unchanged "
-            "(if this runs automatically, check Full Disk Access)")
+        log("Playlists: can't see any music on the iPod - playlists left unchanged")
         return 1
     lib_root = os.path.abspath(a.library).rstrip("/") + "/"
-    written, missing_total, stats = [], 0, []
+    written, failed, missing_total, stats = [], [], 0, []
     for m in src:
         name = os.path.splitext(os.path.basename(m))[0] + ".m3u8"
         out, missing = [], []
@@ -666,9 +672,14 @@ def cmd_playlists_push(a):
             log("            missing: %s" % x)
         stats.append({"name": name[:-5], "tracks": len(out), "missing": len(missing)})
         if not a.dry_run:
-            os.makedirs(dst, exist_ok=True)
-            with open(os.path.join(dst, name), "w", encoding="utf-8", newline="\n") as fh:
-                fh.write("\n".join(out) + ("\n" if out else ""))
+            try:
+                os.makedirs(dst, exist_ok=True)
+                with open(os.path.join(dst, name), "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write("\n".join(out) + ("\n" if out else ""))
+            except OSError as err:
+                log("Playlists: couldn't write %s to the iPod (%s)" % (name, err))
+                failed.append(name)
+                continue
         written.append(name)
     # remove playlists this script created earlier that no longer exist on the Mac
     mpath = os.path.join(dst, MANIFEST)
@@ -676,21 +687,26 @@ def cmd_playlists_push(a):
     if os.path.exists(mpath):
         with open(mpath, encoding="utf-8") as fh:
             previous = {l.strip() for l in fh if l.strip()}
-    stale = sorted(previous - set(written))
-    for s in stale:
-        log("Playlists: %s removed (no longer in %s)" % (s, a.playlists))
-        if not a.dry_run and os.path.exists(os.path.join(dst, s)):
-            os.remove(os.path.join(dst, s))
-    if not a.dry_run and (written or previous):
-        with open(mpath, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(written) + "\n")
+    stale = sorted(previous - set(written) - set(failed))
+    keep_listed = sorted(previous & set(failed))     # still ours, even though this update failed
+    try:
+        for s in stale:
+            log("Playlists: %s removed (no longer in %s)" % (s, a.playlists))
+            if not a.dry_run and os.path.exists(os.path.join(dst, s)):
+                os.remove(os.path.join(dst, s))
+        if not a.dry_run and (written or previous):
+            with open(mpath, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(sorted(written + keep_listed)) + "\n")
+    except OSError as err:
+        log("Playlists: couldn't update the iPod's playlists folder (%s)" % err)
+        return 1
     record("playlists", {"lists": stats, "removed": stale, "dry_run": a.dry_run})
     if not src:
         log("Playlists: none found in %s" % a.playlists)
     elif a.dry_run:
         log("Playlists: DRY RUN - nothing written; 'not on iPod' counts reflect the iPod "
             "before this sync's file copy")
-    return 0
+    return 1 if failed else 0
 
 
 OSA_NAMES = '''

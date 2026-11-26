@@ -292,6 +292,12 @@ def dedupe_resumes(entries):
     return kept, dropped
 
 
+def counts_as_play(length_ms, elapsed_ms):
+    """Last.fm's rule: the track is longer than 30 s, and was played for at
+    least half its length or for 4 minutes."""
+    return length_ms > MIN_LENGTH_MS and (elapsed_ms * 2 >= length_ms or elapsed_ms >= FOUR_MIN_MS)
+
+
 def classify(utc, now):
     if utc < CLOCK_FLOOR:
         return "bad-clock"
@@ -349,8 +355,7 @@ def cmd_scrobble_collect(a):
     dir_cache = {}
     plays, short = [], 0
     for e in entries:
-        if e["length_ms"] <= MIN_LENGTH_MS or not (
-                e["elapsed_ms"] * 2 >= e["length_ms"] or e["elapsed_ms"] >= FOUR_MIN_MS):
+        if not counts_as_play(e["length_ms"], e["elapsed_ms"]):
             short += 1
             continue
         rel = e["path"][len("/Music/"):] if e["path"].startswith("/Music/") else e["path"].lstrip("/")

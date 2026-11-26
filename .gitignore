@@ -1,0 +1,7 @@
+# never commit personal data
+*.log
+*.key
+config
+.DS_Store
+__pycache__/
+*.pyc
